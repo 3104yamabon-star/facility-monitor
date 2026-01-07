@@ -1,13 +1,13 @@
 
-name: Facility Availability Monitor
+ame: Facility Availability Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 5分ごとに実行（厳密な分単位保証はありません）
-  workflow_dispatch:         # 手動実行も可能
+    - cron: "*/5 * * * *"   # 5分おき
+  workflow_dispatch:         # 手動トリガーも可
 
 permissions:
-  contents: write            # リポジトリへのコミットを許可
+  contents: write
 
 jobs:
   monitor:
@@ -36,12 +36,12 @@ jobs:
 
       - name: Run monitor
         env:
-          BASE_URL: ${{ secrets.BASE_URL }}
+          BASE_URL: ${{ secrets.BASE_URL }}                # https://saitama.rsv.ws-scs.jp/web/
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python monitor.py
 
-      - name: Commit & Push snapshot updates (if any)
+      - name: Commit & Push snapshot updates (state/calendar)
         run: |
           set -e
           if [[ -n $(git status --porcelain snapshots/) ]]; then
