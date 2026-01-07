@@ -1,5 +1,4 @@
-
-ame: Facility Availability Monitor
+name: Facility Availability Monitor
 
 on:
   schedule:
