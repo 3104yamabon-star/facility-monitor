@@ -44,10 +44,12 @@ jobs:
           key: ms-playwright-${{ runner.os }}-chromium-1.46.0
           restore-keys: |
             ms-playwright-${{ runner.os }}-chromium-
-
-      - name: Install Playwright browsers
+            
+      - name: Install Playwright (chromium only)
         run: |
-          python -m playwright install --with-deps
+          python -m playwright install-deps
+          python -m playwright install chromium
+
 
       - name: Run monitor (with debug logs)
         env:
