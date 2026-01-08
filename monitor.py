@@ -207,31 +207,32 @@ def take_calendar_screenshot(calendar_root, out_path):
 # --------------------------------------------------------------------------------
 # ステータス認識（×／△／○／〇）
 # --------------------------------------------------------------------------------
+
 def status_from_text(raw_text, patterns):
     """
-    ログ強化版：テキストからステータスを判断し、検出経路をログに出力
+    テキストからステータスを判断（直書き記号＋限定語彙優先）
     """
-    """
-    テキストからステータスを判断（直書き記号優先）
-    ※「空き状況」「空き」などの一般語で誤○にならないよう、広い語彙は使わない
-    """
-    txt = raw_text or ""
-    # 直書き記号のみ
+    txt = (raw_text or "").strip()
+    # 全角スペース→半角、全体を小文字化（限定語彙の誤検知防止のため、置換は最小限）
+    txt_norm = txt.replace("　", " ").lower()
+
+    # 直書き記号（全角記号の揺れ対応）
     for ch in ["○", "〇", "△", "×"]:
         if ch in txt:
             return ch
 
-    # （必要な場合のみ）英語／日本語キーワード
-    t = txt.lower()
+    # 文字化された確定語（「空き状況」などの広い語は入れない）
+    # config.json 側の patterns を優先してチェック
     for kw in patterns["circle"]:
-        if kw in t:
+        if kw in txt_norm:
             return "○"
     for kw in patterns["triangle"]:
-        if kw in t:
+        if kw in txt_norm:
             return "△"
     for kw in patterns["cross"]:
-        if kw in t:
+        if kw in txt_norm:
             return "×"
+
     return None
 
 
