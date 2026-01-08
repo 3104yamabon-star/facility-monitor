@@ -388,9 +388,30 @@ def extract_status_cells(page, calendar_root, config):
             if not s:
                 s = status_from_css(base, page, config)
 
-            if not s:
-                # 記号やステータスが判定できないセルは対象外（誤○にしない）
-                continue
+
+if not s:
+    # 未検出サンプルをログに出す（上位10件）
+    if len(samples) < 10:
+        try:
+            cls = (base.get_attribute("class") or "").lower()
+            bg  = base.evaluate("e => getComputedStyle(e).backgroundImage") or ""
+            # 子要素のimg数・代表src
+            imgs = base.locator("img")
+            jcnt = imgs.count()
+            src0 = imgs.nth(0).get_attribute("src") if jcnt > 0 else ""
+            samples.append({
+                "status": "-",
+                "text": (base.inner_text() or "")[:120],
+                "cls": cls[:80],
+                "bg": bg[:120],
+                "img_cnt": jcnt,
+                "img_src0": (src0 or "")[:120],
+                "bbox": [int(rel_x), int(rel_y), int(bbox["width"]), int(bbox["height"])]
+            })
+        except Exception:
+            pass
+    continue
+
 
             key = f"{int(rel_x/10)}-{int(rel_y/10)}:{txt[:40]}"
             cells.append({
