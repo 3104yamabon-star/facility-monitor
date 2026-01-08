@@ -261,7 +261,10 @@ def status_from_aria(el, patterns):
     title = el.get_attribute("title") or ""
     s = status_from_text(aria + " " + title, patterns)
     if s:
-        print(f"[DEBUG] status_from_aria: 検出 status='{s}' aria='{(aria or )[:60]}' title='{(title or )[:40]}'", flush=True)
+        print(
+            f"[DEBUG] status_from_aria: 検出 status='{s}' "
+            f"aria='{(aria or '')[:60]}' title='{(title or '')[:40]}'",
+            flush=True)
     return s
 
 
