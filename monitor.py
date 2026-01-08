@@ -302,22 +302,19 @@ def looks_like_day_cell(base):
         txt = (base.inner_text() or "").strip()
         cls = (base.get_attribute("class") or "").lower()
 
-        # 曜日ヘッダは除外
-        if re.search(r"(日曜日|月曜日|火曜日|水曜日|木曜日|金曜日|土曜日)", txt):
+        
+        # 曜日ヘッダは除外（簡略化）
+        if re.search(r"(日曜|月曜|火曜|水曜|木曜|金曜|土曜)", txt):
             return False
-
-        # 1〜31 の数字・直記号
+    
+        # 1〜31 の数字 or 直記号
         if re.search(r"\b([1-9]|[12]\d|3[01])\b", txt):
             return True
         if any(ch in txt for ch in ["○", "〇", "△", "×"]):
             return True
-
-        # クラス名ヒント
-        if any(k in cls for k in ["day", "cell", "calendar"]):
+        # クラス名ヒント（少し広め）
+        if any(k in cls for k in ["day", "cell", "calendar", "fc-daygrid-day"]):
             return True
-    except Exception:
-        pass
-    return False
 
 
 def extract_status_cells(page, calendar_root, config):
