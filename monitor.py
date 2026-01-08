@@ -273,37 +273,76 @@ def status_from_aria(el, patterns):
     return s
 
 
+
 def status_from_css(el, page, config):
     """
-    ログ強化版：CSS background-image と class 名からの検出をログ出力
-    """
-    """
-    CSSの background-image と class 名から判断
+    ログ強化版：CSS background-image / class 名 / 疑似要素(::before) / 子要素からの検出
     """
     patterns = config["status_patterns"]
+    cls = el.get_attribute("class") or ""
+    cl  = cls.lower()
+
+    # 1) セル本体の背景画像
     try:
         bg = el.evaluate("e => getComputedStyle(e).backgroundImage") or ""
     except Exception:
         bg = ""
-    cls = el.get_attribute("class") or ""
-
-    # 背景画像URLにキーワード
     s = status_from_text(bg, patterns)
-    if s:
-        return s
+    if s: return s
 
-    # クラス名パターン
-    cl = (cls or "").lower()
+    # 2) ::before の背景画像と content（疑似要素）
+    try:
+        bg_before = el.evaluate("e => getComputedStyle(e, '::before').backgroundImage") or ""
+        content_before = el.evaluate("e => getComputedStyle(e, '::before').content") or ""
+    except Exception:
+        bg_before, content_before = "", ""
+    for cand in (bg_before, content_before):
+        s = status_from_text(cand, patterns)
+        if s: return s
+
+    # 3) クラス名パターン
     for kw in config["css_class_patterns"]["circle"]:
-        if kw in cl:
-            return "○"
+        if kw in cl: return "○"
     for kw in config["css_class_patterns"]["triangle"]:
-        if kw in cl:
-            return "△"
+        if kw in cl: return "△"
     for kw in config["css_class_patterns"]["cross"]:
-        if kw in cl:
-            return "×"
+        if kw in cl: return "×"
+
+    # 4) 子要素（div/span/img）を走査
+    child = el.locator("div, span, img")
+    cnt = child.count()
+    for i in range(min(cnt, 8)):  # 上位8件だけ
+        c = child.nth(i)
+        try:
+            ccls = (c.get_attribute("class") or "").lower()
+        except Exception:
+            ccls = ""
+        # クラス名で判定
+        for kw in config["css_class_patterns"]["circle"]:
+            if kw in ccls: return "○"
+        for kw in config["css_class_patterns"]["triangle"]:
+            if kw in ccls: return "△"
+        for kw in config["css_class_patterns"]["cross"]:
+            if kw in ccls: return "×"
+        # 背景画像/疑似要素
+        try:
+            cbg = c.evaluate("e => getComputedStyle(e).backgroundImage") or ""
+        except Exception:
+            cbg = ""
+        s = status_from_text(cbg, patterns)
+        if s: return s
+        try:
+            cbg_before = c.evaluate("e => getComputedStyle(e, '::before').backgroundImage") or ""
+        except Exception:
+            cbg_before = ""
+        s = status_from_text(cbg_before, patterns)
+        if s: return s
+        # img の alt/src/title も既に status_from_img で拾うが、念のため
+        s = status_from_img(c, patterns)
+        if s: return s
+
     return None
+
 
 
 def looks_like_day_cell(base):
