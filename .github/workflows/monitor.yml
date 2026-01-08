@@ -1,8 +1,9 @@
+
 name: Facility Availability Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"  # 5分おき
   workflow_dispatch:
 
 permissions:
@@ -44,10 +45,10 @@ jobs:
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          PYTHONUNBUFFERED: "1"        # ← 標準出力のバッファリングを無効化
+          PYTHONUNBUFFERED: "1"        # 標準出力のバッファリングを無効化
         run: |
           echo "[INFO] Starting monitor.py ..."
-          python -u monitor.py          # ← -u でアンバッファ
+          python -u monitor.py          # -u でアンバッファ実行
           echo "[INFO] monitor.py finished."
 
       - name: Show snapshot files (debug)
