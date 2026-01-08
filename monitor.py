@@ -467,7 +467,7 @@ def run_monitor():
                 # 当月
                 month_text = get_current_year_month_text(page) or "unknown"
                 print(f"[INFO] current month: {month_text}", flush=True)
-                cal_root = locate_calendar_root(page, month_text or "予約カレンダー")
+                cal_root = locate_calendar_root(page, month_text or "予約カレンダー", facility)
 
                 fshort = FACILITY_TITLE_ALIAS.get(facility.get('name',''), facility.get('name',''))
                 outdir = facility_month_dir(fshort or 'unknown_facility', month_text)
@@ -520,7 +520,7 @@ def run_monitor():
 
                     month_text2 = get_current_year_month_text(page) or f"shift_{step}"
                     print(f"[INFO] month(step={step}): {month_text2}", flush=True)
-                    cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー")
+                    cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー", facility)
 
                     if step in shifts:
                         outdir2 = facility_month_dir(fshort or 'unknown_facility', month_text2)
