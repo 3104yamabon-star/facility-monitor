@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 さいたま市 施設予約システムの空き状況監視（改善のみ通知）
@@ -388,5 +387,3 @@ def draw_highlights_on_image(image_path, cells_to_highlight, alpha=160, border_w
 
     out_img = Image.alpha_composite(img, overlay).convert("RGB")
     out_img.save(image_path)
-
-
