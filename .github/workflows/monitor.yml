@@ -2,7 +2,7 @@ name: Facility Availability Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # 5分おき
+    - cron: "*/5 * * * *"   # 5分おき
   workflow_dispatch:
 
 permissions:
@@ -11,55 +11,50 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+
+    # 🎯 コンテナを指定：ここがポイント！
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.46.0-jammy
+
     steps:
       - name: Restrict to JST 05:00–24:00
         run: |
           HOUR_JST=$(TZ=Asia/Tokyo date +%H)
           echo "Current JST hour: ${HOUR_JST}"
           if [ "$HOUR_JST" -ge 5 ] && [ "$HOUR_JST" -le 23 ]; then
-            echo "Within monitoring window (05:00–24:00 JST). Continue."
+            echo "Within monitoring window. Continue."
           else
             echo "Outside monitoring window. Skip."
             exit 0
-          fi
 
       - name: Checkout
         uses: actions/checkout@v4
+
+      # 🎯 Playwrightのインストールは不要！
+      # Browserインストールも不要！
+      # install-deps も不要！
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: ms-playwright-${{ runner.os }}-chromium-1.46.0
-          restore-keys: |
-            ms-playwright-${{ runner.os }}-chromium-
-
-      - name: Install Playwright (chromium only)
-        run: |
-          python -m playwright install-deps
-          python -m playwright install chromium
-
-      - name: Run monitor (with debug logs)
+      - name: Run monitor
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          PYTHONUNBUFFERED: "1"        # 標準出力のバッファリングを無効化
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "[INFO] Starting monitor.py ..."
-          python -u monitor.py          # -u でアンバッファ実行（DEBUGログを確実に出す）
+          python -u monitor.py
           echo "[INFO] monitor.py finished."
 
-      - name: Show snapshot files (debug)
+      - name: Show snapshot files
         run: |
           echo "----- snapshots tree -----"
           find snapshots -maxdepth 3 -type f -print || true
