@@ -1,11 +1,13 @@
+
 # -*- coding: utf-8 -*-
 """
 さいたま市 施設予約システムの空き状況監視（改善のみ通知）
 - .jsp 直リンク禁止のため毎回トップからクリック遷移
 - 施設×月を巡回し、×→△/○、△→○ の「改善」だけ検知
 - 改善セルは黄色ハイライトで強調した画像を Discord に投稿（タイトル：施設短縮名+月番号）
-- 認識ロジックを強化（テキスト／img属性／ARIA／CSS背景画像／CSSクラス）
-- デバッグ用にカレンダー HTML を保存（snapshots/.../calendar.html）
+- 認識ロジック：テキスト／img属性／ARIA／CSS背景画像／CSSクラス（多段検知）
+- デバッグ：カレンダー HTML を保存（snapshots/.../calendar.html）
+- 進捗ログ（②対応）：施設到達・月ごとの抽出開始を明示ログ出力
 """
 
 import os
@@ -19,7 +21,7 @@ import requests
 from PIL import Image, ImageDraw
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-# （任意）JST時間帯チェック用。不要なら requirements から pytz を外し、本コードの is_within_monitoring_window を False 固定に。
+# （任意）JST時間帯チェック用。不要なら requirements から pytz を外し、本コードの is_within_monitoring_window を True 固定に。
 try:
     import pytz
 except Exception:
@@ -54,7 +56,11 @@ def ensure_dirs():
 
 
 def load_config():
-    return json.loads(CONFIG_PATH.read_text("utf-8"))
+    try:
+        return json.loads(CONFIG_PATH.read_text("utf-8"))
+    except Exception as e:
+        print(f"[ERROR] config.json の読み込みに失敗: {e}", flush=True)
+        raise
 
 
 def jst_now():
@@ -67,7 +73,7 @@ def jst_now():
 def is_within_monitoring_window(start_hour=5, end_hour=23):
     """
     JSTで 05:00〜23:59 を監視対象にする
-    - Workflow側でも時刻制御しているため、ここは保険（True固定にしてもOK）
+    - Workflow側でも時刻制御しているため、ここは保険（True固定でも可）
     """
     try:
         now = jst_now()
@@ -103,7 +109,7 @@ def try_click_text(page, label, timeout_ms=15000):
 def navigate_to_facility(page, facility):
     """
     トップへ → click_sequence の順で施設の当月ページまで到達
-    （最後の「すべて」が含まれていれば、それもクリックする）
+    （鈴谷は click_sequence に「すべて」を含める）
     """
     if not BASE_URL:
         raise RuntimeError("BASE_URL が未設定です。GitHub Secrets へ https://saitama.rsv.ws-scs.jp/web/ を設定してください。")
@@ -188,8 +194,8 @@ def dump_calendar_html(calendar_root, out_path):
     try:
         html = calendar_root.evaluate("el => el.outerHTML")
         Path(out_path).write_text(html, "utf-8")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] calendar HTML dump 失敗: {e}", flush=True)
 
 
 def take_calendar_screenshot(calendar_root, out_path):
@@ -352,13 +358,35 @@ def extract_status_cells(page, calendar_root, config):
     summary = {"○": 0, "△": 0, "×": 0}
     for c in cells:
         summary[c["status"]] += 1
-    print(f"[DEBUG] status counts: ○={summary['○']} △={summary['△']} ×={summary['×']}")
+    print(f"[DEBUG] status counts: ○={summary['○']} △={summary['△']} ×={summary['×']}", flush=True)
     if samples:
-        print("[DEBUG] top samples:")
+        print("[DEBUG] top samples:", flush=True)
         for s in samples:
-            print(f"  - {s['status']} | {s['text'][:60]} | bbox={s['bbox']}")
+            print(f"  - {s['status']} | {s['text'][:60]} | bbox={s['bbox']}", flush=True)
 
     return cells, cal_bbox
 
 
 # --------------------------------------------------------------------------------
+# 改善判定・ハイライト・Discord送付
+# --------------------------------------------------------------------------------
+def draw_highlights_on_image(image_path, cells_to_highlight, alpha=160, border_width=3):
+    """
+    画像に黄色半透明ハイライト
+    """
+    img = Image.open(image_path).convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    for c in cells_to_highlight:
+        x, y = int(c["bbox"]["x"]), int(c["bbox"]["y"])
+        w, h = int(c["bbox"]["w"]), int(c["bbox"]["h"])
+        draw.rectangle([x, y, x + w, y + h],
+                       fill=(255, 255, 0, alpha),
+                       outline=(255, 255, 0, 255),
+                       width=border_width)
+
+    out_img = Image.alpha_composite(img, overlay).convert("RGB")
+    out_img.save(image_path)
+
+
