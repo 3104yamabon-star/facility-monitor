@@ -2,8 +2,8 @@ name: Facility Availability Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # 5分おき
-  workflow_dispatch:         # 手動トリガーも可
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,13 +11,20 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-
     steps:
+      - name: Restrict to JST 05:00–24:00
+        run: |
+          HOUR_JST=$(TZ=Asia/Tokyo date +%H)
+          echo "Current JST hour: ${HOUR_JST}"
+          if [ "$HOUR_JST" -ge 5 ] && [ "$HOUR_JST" -le 23 ]; then
+            echo "Within monitoring window (05:00–24:00 JST). Continue."
+          else
+            echo "Outside monitoring window. Skip."
+            exit 0
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -33,20 +40,26 @@ jobs:
         run: |
           python -m playwright install --with-deps
 
-      - name: Run monitor
+      - name: Run monitor (with debug logs)
         env:
-          BASE_URL: ${{ secrets.BASE_URL }}                # https://saitama.rsv.ws-scs.jp/web/
+          BASE_URL: ${{ secrets.BASE_URL }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python monitor.py
 
-      - name: Commit & Push snapshot updates (state/calendar)
+      - name: Show snapshot files (debug)
+        run: |
+          echo "----- snapshots tree -----"
+          find snapshots -maxdepth 3 -type f -print || true
+          echo "--------------------------"
+
+      - name: Commit & Push snapshot updates
         run: |
           set -e
           if [[ -n $(git status --porcelain snapshots/) ]]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add snapshots/
-            git commit -m "chore: update snapshots ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
+            git commit -m "chore: update snapshots ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))"
             git push
           fi
