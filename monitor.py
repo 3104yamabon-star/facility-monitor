@@ -386,12 +386,10 @@ def looks_like_day_cell(base):
     return False
 
 
+
 def extract_status_cells(page, calendar_root, config):
     """
     カレンダー内のセル（tbody td / gridcell）を広く走査し、ステータスを判定。
-    ヘッダ・大見出しを looks_like_day_cell で除外。
-    戻り値：(cells, cal_bbox)
-    cells = [{key, status, bbox{x,y,w,h}, text}]
     """
     print("[INFO] extract_status_cells: start", flush=True)
 
@@ -403,7 +401,7 @@ def extract_status_cells(page, calendar_root, config):
 
     cells, samples = [], []
 
-    # 候補拡張：divベースや日付グリッド系にも対応（FullCalendar等）
+    # 候補拡張：divベースや日付グリッド系にも対応
     candidates = calendar_root.locator("td, [role='gridcell'], .fc-daygrid-day, .calendar-day, .day")
     cnt = candidates.count()
     print(f"[INFO] candidate cells count={cnt}", flush=True)
@@ -423,8 +421,7 @@ def extract_status_cells(page, calendar_root, config):
             rel_y = max(0, bbox["y"] - cal_y)
             txt = (base.inner_text() or "").strip()
 
-            # --- 検知経路（1～4） ---
-            # 1) テキスト（直記号優先）
+            # 1) テキスト
             s = status_from_text(txt, patterns)
 
             # 2) 子<img>
@@ -440,11 +437,11 @@ def extract_status_cells(page, calendar_root, config):
             if not s:
                 s = status_from_aria(base, patterns)
 
-            # 4) CSS背景／クラス／疑似要素／子要素（status_from_css 側で拡張）
+            # 4) CSS背景／クラス／疑似要素／子要素
             if not s:
                 s = status_from_css(base, page, config)
 
-            # --- 未検出サンプル（観察強化用） ---
+            # 未検出サンプル収集（上位のみ）
             if not s:
                 if len(samples) < debug_top:
                     try:
@@ -470,10 +467,9 @@ def extract_status_cells(page, calendar_root, config):
                         "img_src0": (src0 or "")[:120],
                         "bbox": [int(rel_x), int(rel_y), int(bbox["width"]), int(bbox["height"])]
                     })
-                # 誤検出防止のため未検出はスキップ
                 continue
 
-            # --- 検出済みセルの格納 ---
+            # 検出済みセルを格納
             key = f"{int(rel_x/10)}-{int(rel_y/10)}:{txt[:40]}"
             cells.append({
                 "key": key,
@@ -494,7 +490,7 @@ def extract_status_cells(page, calendar_root, config):
             print(f"[WARN] extract_status_cells: 例外 {e}", flush=True)
             continue
 
-    # --- デバッグ出力（サマリ＋サンプル） ---
+    # サマリ＋トップサンプル（必ず見出しを出す）
     summary = {"○": 0, "△": 0, "×": 0}
     for c in cells:
         summary[c["status"]] += 1
@@ -520,6 +516,7 @@ def extract_status_cells(page, calendar_root, config):
                 )
 
     return cells, cal_bbox
+
 
 
 
