@@ -1,15 +1,21 @@
+
 # -*- coding: utf-8 -*-
 """
-さいたま市 施設予約システムの空き状況監視（改善のみ通知/キャプチャ保存）
+さいたま市 施設予約システムの空き状況監視（改善通知/キャプチャ保存/空き状況集計）
 
-【この版の主な仕様（高速化対応）】
+【主な仕様（高速化＋堅牢化＋集計対応）】
 - 施設ごとの month_shifts（例：当月=0、翌月=1、+2ヶ月=2、+3ヶ月=3）に従い、
   初回のみ施設ページへ到達し、以降は「次の月」を連続クリックして各月をキャプチャ保存。
-  - 南浦和/岩槻: [0,1,2,3]（当月〜3ヶ月後まで）
-  - 岸町/鈴谷:   [0,1]      （当月〜翌月まで）
-- 各月のカレンダー要素を抽出し、HTML/PNG を snapshots/<施設短縮名>/<YYYY年M月>/ に保存。
 - 「次の月」は javascript:moveCalender(...) による同一ページ DOM 差し替えのため、
-  待機は networkidle ではなく「月テキスト（YYYY年M月）の変化」を指標とする。
+  待機は networkidle ではなく「月テキスト（YYYY年M月）の変化」を指標に wait_for_function で行う。
+- 各月のカレンダー要素から「空き状況（◯／△／×）」を集計し、JSON/CSVで保存＋ログに要約を出力。
+
+【前提】
+- config.json（純正 JSON）
+  - facilities[].name / click_sequence / month_shifts
+  - next_month_label: "次の月"
+  - status_patterns（語句→記号の正規化）/ css_class_patterns / debug
+- GitHub Actions の Workflow は python -u monitor.py を実行（既存の構成を想定）
 """
 
 import os
@@ -30,16 +36,16 @@ try:
 except Exception:
     pytz = None
 
-# === 環境変数（GitHub Secrets で設定） ===
+# === 環境変数（GitHub Secrets） ===
 BASE_URL = os.getenv("BASE_URL")  # 例: "https://saitama.rsv.ws-scs.jp/web/"
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-# === ファイルパス ===
+# === パス ===
 BASE_DIR = Path(__file__).resolve().parent
 SNAP_DIR = BASE_DIR / "snapshots"
 CONFIG_PATH = BASE_DIR / "config.json"
 
-# === 施設短縮名（保存ディレクトリ用） ===
+# === 施設短縮名 ===
 FACILITY_TITLE_ALIAS = {
     "岩槻南部公民館": "岩槻",
     "南浦和コミュニティセンター": "南浦和",
@@ -47,7 +53,7 @@ FACILITY_TITLE_ALIAS = {
     "鈴谷公民館": "鈴谷",
 }
 
-# === ステータスの序列（改善判定に使用：必要に応じて） ===
+# === ステータス序列（必要に応じて比較用） ===
 STATUS_RANK = {"×": 0, "△": 1, "○": 2, "〇": 2}
 
 # --------------------------------------------------------------------------------
@@ -95,7 +101,7 @@ def try_click_text(page, label, timeout_ms=15000, quiet=True):
         try:
             locator.wait_for(timeout=timeout_ms)
             locator.click(timeout=timeout_ms)
-            # 最初の遷移時はページロードが走る可能性が高い
+            # 初回遷移はページロードが走ることがある。networkidle待機はここだけ。
             page.wait_for_load_state("networkidle", timeout=30000)
             return True
         except Exception as e:
@@ -106,14 +112,14 @@ def try_click_text(page, label, timeout_ms=15000, quiet=True):
 
 def navigate_to_facility(page, facility):
     """
-    トップへ → click_sequence の順で施設の当月ページまで到達（初回のみ）
+    トップ → click_sequence の順で施設の当月ページまで到達（初回のみ）
     """
     if not BASE_URL:
         raise RuntimeError("BASE_URL が未設定です。Secrets の BASE_URL に https://saitama.rsv.ws-scs.jp/web/ を入れてください。")
     # トップへ
     page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_load_state("networkidle", timeout=60000)
-    # 任意のダイアログ（同意など）がある場合のフォールバック
+    # 任意ダイアログがあれば閉じる
     for opt in ["同意する", "OK", "確認", "閉じる"]:
         try_click_text(page, opt, timeout_ms=2000)
     # 施設のクリック手順
@@ -138,7 +144,7 @@ def get_current_year_month_text(page):
 
 def locate_calendar_root(page, hint):
     """
-    カレンダー本体らしき要素（grid/table等）を探索して最もテキスト量が多いものを選ぶ。
+    カレンダーらしき要素（grid/table等）からテキスト量最大のものを選ぶ。
     """
     candidates = []
     for sel in ["[role='grid']", "table", "section", "div.calendar", "div"]:
@@ -148,7 +154,6 @@ def locate_calendar_root(page, hint):
             el = loc.nth(i)
             try:
                 t = (el.inner_text() or "").strip()
-                # ヒント一致 or カレンダーらしい語句を含む
                 if (hint and hint in t) or re.search(r"(空き状況|予約あり|一部空き|カレンダー)", t):
                     candidates.append((len(t), el))
             except Exception:
@@ -159,7 +164,7 @@ def locate_calendar_root(page, hint):
     return candidates[0][1]
 
 def dump_calendar_html(calendar_root, out_path):
-    """デバッグ用にカレンダー要素の outerHTML を保存"""
+    """デバッグ用：カレンダー要素の outerHTML を保存"""
     try:
         html = calendar_root.evaluate("el => el.outerHTML")
         Path(out_path).write_text(html, "utf-8")
@@ -172,7 +177,7 @@ def take_calendar_screenshot(calendar_root, out_path):
     calendar_root.screenshot(path=str(out_path))
 
 # --------------------------------------------------------------------------------
-# 月遷移（高速化対応版）
+# 月遷移（高速化対応）
 # --------------------------------------------------------------------------------
 def _compute_next_month_text(prev_month_text: str) -> str:
     """'YYYY年M月' → 次月の 'YYYY年M月' を返す（待機の目標に使う）"""
@@ -182,8 +187,7 @@ def _compute_next_month_text(prev_month_text: str) -> str:
             return ""
         y, mo = int(m.group(1)), int(m.group(2))
         if mo == 12:
-            y += 1
-            mo = 1
+            y += 1; mo = 1
         else:
             mo += 1
         return f"{y}年{mo}月"
@@ -195,9 +199,9 @@ def click_next_month(page, label_primary="次の月", calendar_root=None,
     """
     「次の月」へ遷移（強化版）：
     - 探索スコープ：calendar_root優先 → 失敗時は page 全体
-    - 一致方法：厳密一致→部分一致（has-text）、href=moveCalender を直接クリック
-    - 待機方法：ページ遷移ではなく「月テキストの変化」を指標に wait_for_function
-    - 最終フォールバック：リンクの href を eval 実行（javascript:moveCalender(...)）
+    - 一致方法：部分一致（has-text）、href=moveCalender を直接クリック
+    - 待機方法：ページ遷移でなく「月テキストの変化」を wait_for_function で検知
+    - 最終フォールバック：href の JavaScript を eval 実行（javascript:moveCalender(...)）
     """
     scopes = []
     if calendar_root is not None:
@@ -206,7 +210,6 @@ def click_next_month(page, label_primary="次の月", calendar_root=None,
 
     next_month_goal = _compute_next_month_text(prev_month_text or "")
 
-    # クリック候補（順に試す）
     selectors = [
         "a:has-text('次の月')",
         "a:has-text('次')",
@@ -250,8 +253,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None,
                 pass
 
         if not clicked:
-            # 次のスコープで再試行
-            continue
+            continue  # 次のスコープで再試行
 
         # === クリック成功後の待機：月テキストの変化を待つ ===
         try:
@@ -283,7 +285,9 @@ def click_next_month(page, label_primary="次の月", calendar_root=None,
 
     return False
 
-
+# --------------------------------------------------------------------------------
+# 空き状況集計（◯／△／×）
+# --------------------------------------------------------------------------------
 def summarize_vacancies(page, calendar_root, config):
     """
     カレンダー要素から日別の「空き状況」を抽出し、◯/△/× の集計と日別明細を返す。
@@ -291,24 +295,16 @@ def summarize_vacancies(page, calendar_root, config):
       summary_dict = {"○": count, "△": count, "×": count, "未判定": count}
       details_list = [{"day": "9日", "status": "△", "text": "9日 一部空き"}, ...]
     """
-    # 既存のパターン辞書（語句→記号）は config.json にある前提
     patterns = config["status_patterns"]
     summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
     details = []
 
-    # 1) カレンダー内の候補セルを広く拾う
-    candidates = calendar_root.locator("td, [role='gridcell'], .fc-daygrid-day, .calendar-day, .day")
-    cnt = candidates.count()
-
     def _status_from_text(raw):
         txt = (raw or "").strip()
         txt_norm = txt.replace("　", " ").lower()
-
-        # 直書き記号
         for ch in ["○", "〇", "△", "×"]:
             if ch in txt:
                 return ch
-        # 語句パターン
         for kw in patterns["circle"]:
             if kw.lower() in txt_norm:
                 return "○"
@@ -320,8 +316,10 @@ def summarize_vacancies(page, calendar_root, config):
                 return "×"
         return None
 
-    # 2) 各セルのテキストを見て、日付と状態を抽出
+    candidates = calendar_root.locator("td, [role='gridcell'], .fc-daygrid-day, .calendar-day, .day")
+    cnt = candidates.count()
     import re as _re
+
     for i in range(cnt):
         el = candidates.nth(i)
         try:
@@ -329,14 +327,12 @@ def summarize_vacancies(page, calendar_root, config):
         except Exception:
             continue
 
-        # 日付のラベル（「9日」「10日」など）を先に拾う
         mday = _re.search(r"([1-9]|[12]\d|3[01])日", txt)
-        day_label = f"{mday.group(0)}" if mday else None
+        day_label = f"{mday.group(0)}" if mday else ""
 
-        # 状態推定（テキスト優先）
         st = _status_from_text(txt)
 
-        # 子<img> の alt/src/title にも語句や記号があるケースを拾う
+        # 子<img> の alt/src/title
         if not st:
             try:
                 imgs = el.locator("img")
@@ -351,7 +347,7 @@ def summarize_vacancies(page, calendar_root, config):
             except Exception:
                 pass
 
-        # ARIA/title 属性も見る（補助）
+        # ARIA/title
         if not st:
             try:
                 aria = el.get_attribute("aria-label") or ""
@@ -360,7 +356,7 @@ def summarize_vacancies(page, calendar_root, config):
             except Exception:
                 pass
 
-        # CSS 背景やクラス名に手掛かりがあるケース（簡易）
+        # クラス名
         if not st:
             try:
                 cls = (el.get_attribute("class") or "").lower()
@@ -378,25 +374,17 @@ def summarize_vacancies(page, calendar_root, config):
             except Exception:
                 pass
 
-        # 集計
         if not st:
             summary["未判定"] += 1
+            details.append({"day": day_label, "status": "未判定", "text": txt})
         else:
             summary[st] += 1
-
-        # 明細行（テキストも保存）
-        if day_label or st:
-            details.append({
-                "day": day_label or "",
-                "status": st or "未判定",
-                "text": txt,
-            })
+            details.append({"day": day_label, "status": st, "text": txt})
 
     return summary, details
 
-
 # --------------------------------------------------------------------------------
-# 施設→当月/翌月/…のキャプチャ保存（高速化）
+# 保存ユーティリティ
 # --------------------------------------------------------------------------------
 def facility_month_dir(f_short, month_text):
     safe_fac = re.sub(r"[\\/:*?\"<>|]+", "_", f_short)
@@ -405,6 +393,9 @@ def facility_month_dir(f_short, month_text):
     d.mkdir(parents=True, exist_ok=True)
     return d
 
+# --------------------------------------------------------------------------------
+# メイン処理（高速化：初回だけ施設到達→以降は次の月連打）
+# --------------------------------------------------------------------------------
 def run_monitor():
     print("[INFO] run_monitor: start", flush=True)
     ensure_dirs()
@@ -427,113 +418,12 @@ def run_monitor():
         for facility in facilities:
             try:
                 print(f"[INFO] navigate_to_facility: {facility.get('name','unknown')}", flush=True)
-                # 初回のみ施設ページへ到達
                 navigate_to_facility(page, facility)
 
-                # 監視対象の月ステップ
                 shifts = facility.get("month_shifts", [0, 1])
                 shifts = sorted(set(int(s) for s in shifts if isinstance(s, (int, float))))
                 if 0 not in shifts:
                     shifts.insert(0, 0)
 
-                # 当月キャプチャ
+                # 当月
                 month_text = get_current_year_month_text(page) or "unknown"
-                print(f"[INFO] current month: {month_text}", flush=True)
-                cal_root = locate_calendar_root(page, month_text or "予約カレンダー")
-
-                fshort = FACILITY_TITLE_ALIAS.get(facility.get('name',''), facility.get('name',''))
-                outdir = facility_month_dir(fshort or 'unknown_facility', month_text)
-                dump_calendar_html(cal_root, outdir / 'calendar.html')
-                take_calendar_screenshot(cal_root, outdir / 'calendar.png')
-                print(f"[INFO] saved: {facility.get('name','')} - {month_text}", flush=True)
-
-
-# ★ 追加：空き状況の集計＆保存
-summary, details = summarize_vacancies(page, cal_root, config)
-# JSON 出力
-(outdir / "status_counts.json").write_text(
-    json.dumps({"month": month_text, "facility": facility.get('name',''), "summary": summary, "details": details},
-               ensure_ascii=False, indent=2),
-    "utf-8"
-)
-# CSV（簡易）
-import csv
-with (outdir / "status_details.csv").open("w", newline="", encoding="utf-8") as fcsv:
-    w = csv.writer(fcsv)
-    w.writerow(["day", "status", "text"])
-    for row in details:
-        w.writerow([row["day"], row["status"], row["text"]])
-
-print(f"[INFO] summary({facility.get('name','')} - {month_text}): ○={summary['○']} △={summary['△']} ×={summary['×']} 未判定={summary['未判定']}", flush=True)
-
-              
-                # 「次の月」を連続クリック → 各月キャプチャ（高速化本体）
-                max_shift = max(shifts)
-                next_label = config.get("next_month_label", "次の月")
-                prev_month_text = month_text
-
-                for step in range(1, max_shift + 1):
-                    ok = click_next_month(
-                        page,
-                        label_primary=next_label,
-                        calendar_root=cal_root,
-                        prev_month_text=prev_month_text,
-                        wait_timeout_ms=20000
-                    )
-                    if not ok:
-                        # 失敗時の全画面スクリーンショット（原因調査用）
-                        failed = SNAP_DIR / f"failed_next_month_step{step}_{fshort}.png"
-                        try:
-                            page.screenshot(path=str(failed))
-                        except Exception:
-                            pass
-                        print(f"[WARN] next-month click failed at step={step} (full-page captured)", flush=True)
-                        break
-
-                    # 月テキスト更新後に再取得・キャプチャ
-                    month_text2 = get_current_year_month_text(page) or f"shift_{step}"
-                    print(f"[INFO] month(step={step}): {month_text2}", flush=True)
-                    cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー")
-
-                    if step in shifts:  # 監視対象なら保存
-                        outdir2 = facility_month_dir(fshort or 'unknown_facility', month_text2)
-                        dump_calendar_html(cal_root2, outdir2 / 'calendar.html')
-                        take_calendar_screenshot(cal_root2, outdir2 / 'calendar.png')
-                        print(f"[INFO] saved: {facility.get('name','')} - {month_text2}", flush=True)
-
-
-# ★ 追加：空き状況の集計＆保存
-summary2, details2 = summarize_vacancies(page, cal_root2, config)
-(outdir2 / "status_counts.json").write_text(
-    json.dumps({"month": month_text2, "facility": facility.get('name',''), "summary": summary2, "details": details2},
-               ensure_ascii=False, indent=2),
-    "utf-8"
-)
-import csv
-with (outdir2 / "status_details.csv").open("w", newline="", encoding="utf-8") as fcsv:
-    w = csv.writer(fcsv)
-    w.writerow(["day", "status", "text"])
-    for row in details2:
-        w.writerow([row["day"], row["status"], row["text"]])
-
-print(f"[INFO] summary({facility.get('name','')} - {month_text2}): ○={summary2['○']} △={summary2['△']} ×={summary2['×']} 未判定={summary2['未判定']}", flush=True)
-
-                  
-                    # 次ループの基準
-                    cal_root = cal_root2
-                    prev_month_text = month_text2
-
-            except Exception as e:
-                print(f"[WARN] run_monitor: facility処理中に例外: {e}", flush=True)
-                continue
-
-        browser.close()
-
-# --------------------------------------------------------------------------------
-# エントリポイント
-# --------------------------------------------------------------------------------
-if __name__ == "__main__":
-    if not is_within_monitoring_window():
-        print("[INFO] outside monitoring window. exit.", flush=True)
-    else:
-        run_monitor()
