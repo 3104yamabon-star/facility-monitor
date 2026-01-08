@@ -1,3 +1,4 @@
+
 {
   "facilities": [
     {
@@ -25,16 +26,15 @@
   "next_month_label": "翌月",
 
   "calendar_root_hint": "空き状況",
-  "status_chars": ["×", "△", "○", "〇"],
 
   "status_patterns": {
-    "circle": ["ok", "maru", "circle", "able", "vacant", "空き", "予約可", "○", "〇"],
-    "triangle": ["few", "partial", "shoukai", "△", "残り", "一部"],
-    "cross": ["ng", "batsu", "cross", "full", "不可", "満", "×"]
+    "circle": ["maru", "circle", "○", "〇"],
+    "triangle": ["partial", "few", "△"],
+    "cross": ["ng", "batsu", "cross", "×", "full"]
   },
 
   "css_class_patterns": {
-    "circle": ["status-ok", "ok", "vacant", "maru", "available", "able"],
+    "circle": ["status-ok", "ok", "vacant", "maru", "available"],
     "triangle": ["status-partial", "partial", "few", "warning", "△"],
     "cross": ["status-ng", "full", "unavailable", "batsu", "×", "no"]
   },
