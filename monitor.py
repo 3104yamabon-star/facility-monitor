@@ -327,13 +327,14 @@ def click_next_month(page, label_primary="次の月", calendar_root=None,
 # --------------------------------------------------------------------------------
 # 空き状況集計（◯／△／×）
 # --------------------------------------------------------------------------------
+
 def summarize_vacancies(page, calendar_root, config):
     """
-    カレンダー要素から日別の「空き状況」を抽出し、◯/△/× の集計と日別明細を返す。
-    - 戻り値: (summary_dict, details_list)
-      summary_dict = {"○": count, "△": count, "×": count, "未判定": count}
-      details_list = [{"day": "9日", "status": "△", "text": "9日 一部空き"}, ...]
+    カレンダー要素から日別の空き状況を抽出し ○/△/× を集計する。
+    日付の無いセル（ヘッダや説明セル）はスキップする。
     """
+    import re as _re
+
     patterns = config["status_patterns"]
     summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
     details = []
@@ -341,9 +342,13 @@ def summarize_vacancies(page, calendar_root, config):
     def _status_from_text(raw):
         txt = (raw or "").strip()
         txt_norm = txt.replace("　", " ").lower()
+
+        # 記号の直接検出
         for ch in ["○", "〇", "△", "×"]:
             if ch in txt:
-                return ch
+                return {"〇": "○"}.get(ch, ch)
+
+        # パターン（キーワード）で検出
         for kw in patterns["circle"]:
             if kw.lower() in txt_norm:
                 return "○"
@@ -353,65 +358,87 @@ def summarize_vacancies(page, calendar_root, config):
         for kw in patterns["cross"]:
             if kw.lower() in txt_norm:
                 return "×"
+
         return None
 
-    
-candidates = calendar_root.locator(
-    ":scope td, :scope [role='gridcell'], :scope .fc-daygrid-day, :scope .calendar-day"
-)
-cnt = candidates.count()
-# 'div'や汎用'.day'は外す（誤検出防止）
+    # ----- 対象セル：tbody 内の td に限定（ヘッダ th を除外） -----
+    candidates = calendar_root.locator(
+        ":scope tbody td, :scope [role='gridcell']"
+    )
 
-    import re as _re
+    cnt = candidates.count()
 
     for i in range(cnt):
         el = candidates.nth(i)
+
+        # セル内テキスト
         try:
             txt = (el.inner_text() or "").strip()
         except Exception:
             continue
 
-        
-mday = _re.search(r"([1-9]|[12]\d|3[01])\s*日", txt)
-if not mday:
-    # '空き状況'など月外テキストだけのセルを除外
-    continue
-day_label = f"{mday.group(0)}"
+        # 先頭付近で日付（1日, 2日 ...）を探す
+        head = txt[:40]
+        mday = _re.search(r"^([1-9]|[12]\d|3[01])\s*日", head, flags=_re.MULTILINE)
 
+        # aria-label/title に日付がある場合も補助検出
+        if not mday:
+            try:
+                aria = el.get_attribute("aria-label") or ""
+                title = el.get_attribute("title") or ""
+                mday = _re.search(r"([1-9]|[12]\d|3[01])\s*日", aria + " " + title)
+            except Exception:
+                pass
 
+        # img の alt/title も一応確認
+        if not mday:
+            try:
+                imgs = el.locator("img")
+                jcnt = imgs.count()
+                for j in range(jcnt):
+                    alt = imgs.nth(j).get_attribute("alt") or ""
+                    tit = imgs.nth(j).get_attribute("title") or ""
+                    mm = _re.search(r"([1-9]|[12]\d|3[01])\s*日", alt + " " + tit)
+                    if mm:
+                        mday = mm
+                        break
+            except Exception:
+                pass
+
+        # ★ 日付が無いセルはスキップ（ヘッダ・説明セル除外）
+        if not mday:
+            continue
+
+        day_label = f"{mday.group(0)}"
+
+        # 状態判定：テキスト → 画像 → aria/title → class
         st = _status_from_text(txt)
 
-        # 子<img> の alt/src/title
         if not st:
             try:
                 imgs = el.locator("img")
                 jcnt = imgs.count()
                 for j in range(jcnt):
                     alt = imgs.nth(j).get_attribute("alt") or ""
-                    title = imgs.nth(j).get_attribute("title") or ""
+                    tit = imgs.nth(j).get_attribute("title") or ""
                     src = imgs.nth(j).get_attribute("src") or ""
-                    st = _status_from_text(alt + " " + title) or _status_from_text(src)
+                    st = _status_from_text(alt + " " + tit) or _status_from_text(src)
                     if st:
                         break
             except Exception:
                 pass
 
-        # ARIA/title
         if not st:
             try:
                 aria = el.get_attribute("aria-label") or ""
-                title = el.get_attribute("title") or ""
-                st = _status_from_text(aria + " " + title)
-            except Exception:
-                pass
-
-        # クラス名
-        if not st:
-            try:
+                tit = el.get_attribute("title") or ""
                 cls = (el.get_attribute("class") or "").lower()
-                for kw in config["css_class_patterns"]["circle"]:
-                    if kw in cls:
-                        st = "○"; break
+                st = _status_from_text(aria + " " + tit)
+
+                if not st:
+                    for kw in config["css_class_patterns"]["circle"]:
+                        if kw in cls:
+                            st = "○"; break
                 if not st:
                     for kw in config["css_class_patterns"]["triangle"]:
                         if kw in cls:
@@ -424,13 +451,13 @@ day_label = f"{mday.group(0)}"
                 pass
 
         if not st:
-            summary["未判定"] += 1
-            details.append({"day": day_label, "status": "未判定", "text": txt})
-        else:
-            summary[st] += 1
-            details.append({"day": day_label, "status": st, "text": txt})
+            st = "未判定"
+
+        summary[st] += 1
+        details.append({"day": day_label, "status": st, "text": txt})
 
     return summary, details
+
 
 # --------------------------------------------------------------------------------
 # 保存ユーティリティ
