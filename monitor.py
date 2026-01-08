@@ -333,14 +333,12 @@ def extract_status_cells(page, calendar_root, config):
 
     cells, samples = [], []
 
-    # 候補を限定：thead/section/div見出しではなく、tbody td / gridcell を優先
-    candidates = page.locator("tbody td")
-    if candidates.count() == 0:
-        candidates = calendar_root.locator("[role='gridcell']")
-    if candidates.count() == 0:
-        candidates = calendar_root.locator("td, [role='gridcell']")
-
+    
+    # 候補拡張：divベースや日付グリッド系にも対応（FullCalendar等）
+    candidates = calendar_root.locator("td, [role='gridcell'], .fc-daygrid-day, .calendar-day, .day")
     cnt = candidates.count()
+    print(f"[INFO] candidate cells count={cnt}", flush=True)
+
     for i in range(cnt):
         base = candidates.nth(i)
 
