@@ -283,6 +283,118 @@ def click_next_month(page, label_primary="次の月", calendar_root=None,
 
     return False
 
+
+def summarize_vacancies(page, calendar_root, config):
+    """
+    カレンダー要素から日別の「空き状況」を抽出し、◯/△/× の集計と日別明細を返す。
+    - 戻り値: (summary_dict, details_list)
+      summary_dict = {"○": count, "△": count, "×": count, "未判定": count}
+      details_list = [{"day": "9日", "status": "△", "text": "9日 一部空き"}, ...]
+    """
+    # 既存のパターン辞書（語句→記号）は config.json にある前提
+    patterns = config["status_patterns"]
+    summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
+    details = []
+
+    # 1) カレンダー内の候補セルを広く拾う
+    candidates = calendar_root.locator("td, [role='gridcell'], .fc-daygrid-day, .calendar-day, .day")
+    cnt = candidates.count()
+
+    def _status_from_text(raw):
+        txt = (raw or "").strip()
+        txt_norm = txt.replace("　", " ").lower()
+
+        # 直書き記号
+        for ch in ["○", "〇", "△", "×"]:
+            if ch in txt:
+                return ch
+        # 語句パターン
+        for kw in patterns["circle"]:
+            if kw.lower() in txt_norm:
+                return "○"
+        for kw in patterns["triangle"]:
+            if kw.lower() in txt_norm:
+                return "△"
+        for kw in patterns["cross"]:
+            if kw.lower() in txt_norm:
+                return "×"
+        return None
+
+    # 2) 各セルのテキストを見て、日付と状態を抽出
+    import re as _re
+    for i in range(cnt):
+        el = candidates.nth(i)
+        try:
+            txt = (el.inner_text() or "").strip()
+        except Exception:
+            continue
+
+        # 日付のラベル（「9日」「10日」など）を先に拾う
+        mday = _re.search(r"([1-9]|[12]\d|3[01])日", txt)
+        day_label = f"{mday.group(0)}" if mday else None
+
+        # 状態推定（テキスト優先）
+        st = _status_from_text(txt)
+
+        # 子<img> の alt/src/title にも語句や記号があるケースを拾う
+        if not st:
+            try:
+                imgs = el.locator("img")
+                jcnt = imgs.count()
+                for j in range(jcnt):
+                    alt = imgs.nth(j).get_attribute("alt") or ""
+                    title = imgs.nth(j).get_attribute("title") or ""
+                    src = imgs.nth(j).get_attribute("src") or ""
+                    st = _status_from_text(alt + " " + title) or _status_from_text(src)
+                    if st:
+                        break
+            except Exception:
+                pass
+
+        # ARIA/title 属性も見る（補助）
+        if not st:
+            try:
+                aria = el.get_attribute("aria-label") or ""
+                title = el.get_attribute("title") or ""
+                st = _status_from_text(aria + " " + title)
+            except Exception:
+                pass
+
+        # CSS 背景やクラス名に手掛かりがあるケース（簡易）
+        if not st:
+            try:
+                cls = (el.get_attribute("class") or "").lower()
+                for kw in config["css_class_patterns"]["circle"]:
+                    if kw in cls:
+                        st = "○"; break
+                if not st:
+                    for kw in config["css_class_patterns"]["triangle"]:
+                        if kw in cls:
+                            st = "△"; break
+                if not st:
+                    for kw in config["css_class_patterns"]["cross"]:
+                        if kw in cls:
+                            st = "×"; break
+            except Exception:
+                pass
+
+        # 集計
+        if not st:
+            summary["未判定"] += 1
+        else:
+            summary[st] += 1
+
+        # 明細行（テキストも保存）
+        if day_label or st:
+            details.append({
+                "day": day_label or "",
+                "status": st or "未判定",
+                "text": txt,
+            })
+
+    return summary, details
+
+
 # --------------------------------------------------------------------------------
 # 施設→当月/翌月/…のキャプチャ保存（高速化）
 # --------------------------------------------------------------------------------
