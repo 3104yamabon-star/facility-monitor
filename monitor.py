@@ -350,41 +350,41 @@ def run_monitor():
                 take_calendar_screenshot(cal_root, outdir / 'calendar.png')
                 print(f"[INFO] saved: {facility.get('name','')} - {month_text}", flush=True)
 
-                # 「次の月」を連続クリック → 各月キャプチャ（高速化本体）
-                max_shift = max(shifts)
-                next_label = config.get("next_month_label", "次の月")
-                prev_month_text = month_text
+                
+# 以降は「次の月」連打 → 各月キャプチャ
+max_shift = max(shifts)
+next_label = config.get("next_month_label", "次の月")
+prev_month_text = month_text
 
-                for step in range(1, max_shift + 1):
-                    ok = click_next_month(page,
-                                          label_primary=next_label,
-                                          calendar_root=cal_root,
-                                          prev_month_text=prev_month_text,
-                                          wait_timeout_ms=10000)
-                    if not ok:
-                        # 失敗時の全画面スクリーンショット（原因調査用）
-                        failed = SNAP_DIR / f"failed_next_month_step{step}_{fshort}.png"
-                        try:
-                            page.screenshot(path=str(failed))
-                        except Exception:
-                            pass
-                        print(f"[WARN] next-month click failed at step={step} (full-page captured)", flush=True)
-                        break
+for step in range(1, max_shift + 1):
+    ok = click_next_month(page,
+                          label_primary=next_label,
+                          calendar_root=cal_root,
+                          prev_month_text=prev_month_text,
+                          wait_timeout_ms=20000)
+    if not ok:
+        failed = SNAP_DIR / f"failed_next_month_step{step}_{fshort}.png"
+        try:
+            page.screenshot(path=str(failed))
+        except Exception:
+            pass
+        print(f"[WARN] next-month click failed at step={step} (full-page captured)", flush=True)
+        break
 
-                    # 月テキスト更新後に再取得・キャプチャ
-                    month_text2 = get_current_year_month_text(page) or f"shift_{step}"
-                    print(f"[INFO] month(step={step}): {month_text2}", flush=True)
-                    cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー")
+    month_text2 = get_current_year_month_text(page) or f"shift_{step}"
+    print(f"[INFO] month(step={step}): {month_text2}", flush=True)
+    cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー")
 
-                    if step in shifts:  # 監視対象なら保存
-                        outdir2 = facility_month_dir(fshort or 'unknown_facility', month_text2)
-                        dump_calendar_html(cal_root2, outdir2 / 'calendar.html')
-                        take_calendar_screenshot(cal_root2, outdir2 / 'calendar.png')
-                        print(f"[INFO] saved: {facility.get('name','')} - {month_text2}", flush=True)
+    if step in shifts:
+        outdir2 = facility_month_dir(fshort or 'unknown_facility', month_text2)
+        dump_calendar_html(cal_root2, outdir2 / 'calendar.html')
+        take_calendar_screenshot(cal_root2, outdir2 / 'calendar.png')
+        print(f"[INFO] saved: {facility.get('name','')} - {month_text2}", flush=True)
 
-                    # 次ループの基準
-                    cal_root = cal_root2
-                    prev_month_text = month_text2
+    cal_root = cal_root2
+    prev_month_text = month_text2
+
+
 
             except Exception as e:
                 print(f"[WARN] run_monitor: facility処理中に例外: {e}", flush=True)
