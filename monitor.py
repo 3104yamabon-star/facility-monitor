@@ -4,7 +4,7 @@
 さいたま市 施設予約システムの空き状況監視
  - 監視範囲の限定（カレンダー枠）
  - 日付の無いセルをスキップ
- - 次の月遷移の安定化（施設固有セレクタ／outerHTML変化待ち）
+ - 次の月遷移の安定化（施設固有セレクタ／outerHTML変化待ち／JSフォールバック）
  - 集計が変化した時のみタイムスタンプ付き履歴を保存
  - パフォーマンス改善（不要リソースのロード抑制）
  - 監視時間帯のガードを CLI/環境変数で制御可能（--force / MONITOR_FORCE）
@@ -18,13 +18,13 @@
 - MONITOR_START_HOUR=5   → 開始時刻（JST、デフォルト 5）
 - MONITOR_END_HOUR=23    → 終了時刻（JST、デフォルト 23）
 
-【config.json 例】
+【config.json 例（純粋JSON）】
 {
   "facilities": [
     {
       "name": "南浦和コミュニティセンター",
-      "click_sequence": ["施設の空き状況", "利用目的から", "屋内スポーツ", "バドミントン", "南浦和コミュニティセンター"],
-      "month_shifts": [0, 1, 2, 3],
+      "click_sequence": ["施設の空き状況","利用目的から","屋内スポーツ","バドミントン","南浦和コミュニティセンター"],
+      "month_shifts": [0,1,2,3],
       "calendar_selector": "table.reservation-calendar",
       "next_month_selector": "a[href*='moveCalender']"
     }
@@ -41,11 +41,9 @@ import os
 import sys
 import json
 import re
-import time
 import datetime
 from pathlib import Path
 
-from PIL import Image, ImageDraw  # 互換のため残置
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 # JST時間帯チェック
@@ -236,70 +234,3 @@ def _compute_next_month_text(prev_month_text: str) -> str:
             return ""
         y, mo = int(m.group(1)), int(m.group(2))
         if mo == 12:
-            y += 1
-            mo = 1
-        else:
-            mo += 1
-        return f"{y}年{mo}月"
-    except Exception:
-        return ""
-
-def click_next_month(page,
-                     label_primary="次の月",
-                     calendar_root=None,
-                     prev_month_text=None,
-                     wait_timeout_ms=20000,
-                     facility=None):
-    sel_cfg = (facility or {}).get("next_month_selector")
-    clicked = False
-
-    def _try_click(selector: str):
-        nonlocal clicked
-        try:
-            el = page.locator(selector).first
-            el.scroll_into_view_if_needed()
-            el.click(timeout=2000)
-            clicked = True
-        except Exception:
-            pass
-
-    if sel_cfg:
-        _try_click(sel_cfg)
-
-    scopes = []
-    if calendar_root is not None:
-        scopes.append(calendar_root)
-    scopes.append(page)
-
-    selectors = [
-        "a:has-text('次の月')",
-        "a:has-text('次')",
-        "a[href*='moveCalender']",
-    ]
-
-    for scope in scopes:
-        if clicked:
-            break
-        for sel in selectors[:2]:
-            try:
-                el = scope.locator(sel).first
-                el.scroll_into_view_if_needed()
-                el.click(timeout=2000)
-                clicked = True
-                break
-            except Exception:
-                pass
-        if clicked:
-            break
-        try:
-            el = scope.locator("a[href*='moveCalender']").first
-            el.scroll_into_view_if_needed()
-            el.click(timeout=2000)
-            clicked = True
-        except Exception:
-            pass
-        if clicked:
-            break
-        try:
-            el = scope.locator("a[href*='moveCalender']").first
-            href = el.get_attribute("href") or ""
