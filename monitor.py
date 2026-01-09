@@ -9,10 +9,9 @@
 - Playwrightの既定タイムアウトを5秒に短縮（page.set_default_timeout(5000)）
 - それ以外の機能（カレンダー枠の限定、日付セルのみ、次月への絶対日付遷移、差分時のみ履歴保存、詳細タイマー）は現状維持
 
-★ 今回のご要望対応（最小限の高速化）:
-- 「next-month: wait outerHTML change」を完全削除（20秒の固定待ちを廃止）
-- 月送りの成功判定は「月テキスト変化」だけで判断
-- 画面安定化のための猶予（GRACE_MS=1500ms 既定）は維持
+★ 今回のご要望対応（高速化）:
+① 固定 1.5s の猶予をアダプティブ待機に変更（初期200ms＋セル数検知、上限GRACE_MS=1000ms既定）
+② summarize_vacancies を HTML一括パース化（PlaywrightのDOMアクセスを極小化）
 """
 import os
 import sys
@@ -22,7 +21,7 @@ import datetime
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 from playwright.sync_api import sync_playwright
 
 # ====== 環境 ======
@@ -38,8 +37,12 @@ MONITOR_START_HOUR = int(os.getenv("MONITOR_START_HOUR", "5"))
 MONITOR_END_HOUR = int(os.getenv("MONITOR_END_HOUR", "23"))
 TIMING_VERBOSE = os.getenv("TIMING_VERBOSE", "0").strip() == "1"
 
-# ★ 安定化猶予（ミリ秒）: 既定 1500ms（環境変数で変更可）
-GRACE_MS = int(os.getenv("GRACE_MS", "1500"))
+# ★ 安定化猶予上限（ミリ秒）: 既定 1000ms（環境変数で変更可）
+GRACE_MS_DEFAULT = 1000
+try:
+    GRACE_MS = max(0, int(os.getenv("GRACE_MS", str(GRACE_MS_DEFAULT))))
+except Exception:
+    GRACE_MS = GRACE_MS_DEFAULT
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.getenv("OUTPUT_DIR", str(BASE_DIR / "snapshots"))).resolve()
@@ -102,17 +105,32 @@ def safe_element_screenshot(el, out: Path):
     out.parent.mkdir(parents=True, exist_ok=True)
     el.scroll_into_view_if_needed(); el.screenshot(path=str(out))
 
-# ====== 画面安定化用ヘルパー ======
+# ====== 画面安定化用ヘルパー（① アダプティブ待機） ======
 def grace_pause(page, label: str = "grace wait"):
-    """画面の安定化待ち（既定 1.5s）。GRACE_MS で調整可能。"""
-    try:
-        ms = max(0, int(GRACE_MS))
-    except Exception:
-        ms = 1500
-    if ms <= 0:
+    """
+    アダプティブ安定化待機:
+      - 初期 200ms 待機
+      - 以降 200ms 間隔でカレンダーのセル存在を確認（十分な数 >=28 が見えたら即抜け）
+      - 上限は GRACE_MS（既定 1000ms）
+    """
+    ms_cap = GRACE_MS if isinstance(GRACE_MS, int) else GRACE_MS_DEFAULT
+    if ms_cap <= 0:
         return
-    with time_section(f"{label} ({ms}ms)"):
-        page.wait_for_timeout(ms)
+    with time_section(f"{label} (adaptive, <= {ms_cap}ms)"):
+        page.wait_for_timeout(200)
+        spent = 200
+        try:
+            while spent < ms_cap:
+                # カレンダーセルの存在チェック（汎用）
+                cells = page.locator("[role='gridcell'], table.reservation-calendar tbody td, .fc-daygrid-day, .calendar-day")
+                cnt = cells.count()
+                if cnt >= 28:
+                    break
+                page.wait_for_timeout(200)
+                spent += 200
+        except Exception:
+            # 例外でも致命ではない（上限まで待った扱い）
+            pass
 
 # ====== Playwright操作 ======
 def try_click_text(page, label: str, timeout_ms: int = 15000, quiet=True) -> bool:
@@ -190,18 +208,19 @@ def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
     page.set_default_timeout(5000)  # 30s → 5s
     click_optional_dialogs_fast(page)
 
+    # click_sequence
     for label in facility.get("click_sequence", []):
         with time_section(f"click_sequence: '{label}'"):
             ok = try_click_text(page, label, timeout_ms=5000)
             if not ok:
                 raise RuntimeError(f"クリック対象が見つかりません：『{label}』（施設: {facility.get('name','')}）")
 
-    # 空き状況画面を開いた直後の安定化猶予
+    # 施設の空き状況画面直後のアダプティブ待機（①）
     grace_pause(page, label="after availability view shown")
 
 def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
     pat = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
-    targets = []
+    targets: List[str] = []
     try:
         if calendar_root is not None:
             targets.append(calendar_root.inner_text())
@@ -338,8 +357,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
 
         if not clicked: return False
 
-    # 2) ★ outerHTML の変化待ちは削除（高速化）
-    #    月送りの成功判定は「月テキストが +1 の月に変わること」だけを待つ
+    # 2) 月テキストが +1 の月に変わることのみを待つ（高速化）
     with time_section("next-month: wait month text change (+1)"):
         goal = _compute_next_month_text(prev_month_text or "")
         try:
@@ -359,75 +377,257 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
             print(f"[WARN] next-month moved backward: {prev_month_text} -> {cur}", flush=True)
             return False
 
-    # 4) 軽い安定化待ち（既存の grace_pause）
+    # 4) 月遷移直後のアダプティブ待機（①）
     grace_pause(page, label="after month transition")
 
     return True
 
 # ====== 集計 / 保存 ======
 from datetime import datetime as _dt
+
+def _st_from_text_and_src(raw: str, patterns: Dict[str, List[str]]) -> Optional[str]:
+    """テキストやsrcからステータス（○/△/×）推定。〇→○に正規化。"""
+    if raw is None:
+        return None
+    txt = raw.strip()
+    n = txt.replace("　", " ").lower()
+    for ch in ["○", "〇", "△", "×"]:
+        if ch in txt:
+            return {"〇": "○"}.get(ch, ch)
+    for kw in patterns["circle"]:
+        if kw.lower() in n:
+            return "○"
+    for kw in patterns["triangle"]:
+        if kw.lower() in n:
+            return "△"
+    for kw in patterns["cross"]:
+        if kw.lower() in n:
+            return "×"
+    return None
+
+def _status_from_class(cls: str, css_class_patterns: Dict[str, List[str]]) -> Optional[str]:
+    if not cls:
+        return None
+    c = cls.lower()
+    for kw in css_class_patterns["circle"]:
+        if kw in c:
+            return "○"
+    for kw in css_class_patterns["triangle"]:
+        if kw in c:
+            return "△"
+    for kw in css_class_patterns["cross"]:
+        if kw in c:
+            return "×"
+    return None
+
+def _extract_td_blocks(html: str) -> List[Dict[str, str]]:
+    """
+    <td ...> ... </td> ブロックを簡易抽出。
+    attrs: class, title, aria-label を必要に応じて拾う
+    """
+    td_blocks: List[Dict[str, str]] = []
+    # ざっくりと <td ...>...</td> の塊を抜く（貪欲でない）
+    for m in re.finditer(r"<td\b([^>]*)>(.*?)</td>", html, flags=re.IGNORECASE | re.DOTALL):
+        attrs = m.group(1) or ""
+        inner = m.group(2) or ""
+        # 属性抽出（class/title/aria-label）
+        cls = ""
+        title = ""
+        aria = ""
+        mcls = re.search(r'class\s*=\s*"([^"]*)"', attrs, flags=re.IGNORECASE)
+        if mcls: cls = mcls.group(1)
+        mtitle = re.search(r'title\s*=\s*"([^"]*)"', attrs, flags=re.IGNORECASE)
+        if mtitle: title = mtitle.group(1)
+        maria = re.search(r'aria-label\s*=\s*"([^"]*)"', attrs, flags=re.IGNORECASE)
+        if maria: aria = maria.group(1)
+        td_blocks.append({"attrs": attrs, "class": cls, "title": title, "aria": aria, "inner": inner})
+    return td_blocks
+
+def _inner_text_like(html_fragment: str) -> str:
+    """
+    簡易的にタグを落としてテキスト化（innerText に近い形）。
+    """
+    # 改行・<br> をスペースに
+    s = re.sub(r"<br\s*/?>", " ", html_fragment, flags=re.IGNORECASE)
+    # タグ除去
+    s = re.sub(r"<[^>]+>", " ", s)
+    # 余分な空白整形
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+def _find_day_in_text(text: str) -> Optional[str]:
+    # 先頭/途中に「1〜31 日」パターンが含まれていれば日を返す
+    m = re.search(r"([1-9]|[12]\d|3[01])\s*日", text)
+    return m.group(0) if m else None
+
 def summarize_vacancies(page, calendar_root, config):
-    with time_section("summarize_vacancies"):
+    """
+    ② HTML一括パース版:
+      - calendar_root.outerHTML を一度だけ取得
+      - <td> ブロックを抽出し、テキストや属性を文字列処理で判定
+      - Playwright の多回DOMアクセスを排除して高速化
+    """
+    with time_section("summarize_vacancies(html-parse)"):
+        patterns = config["status_patterns"]
+        css_class_patterns = config["css_class_patterns"]
+        summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
+        details: List[Dict[str, str]] = []
+
+        # 1) HTML を一度だけ取得
+        html = ""
+        try:
+            html = calendar_root.evaluate("el => el.outerHTML")
+        except Exception:
+            # 取得失敗時は従来ロジックにフォールバック（安全策）
+            return _summarize_vacancies_fallback(page, calendar_root, config)
+
+        # 2) <td> ブロックを抽出
+        td_blocks = _extract_td_blocks(html)
+
+        # 3) 各 <td> から day/status を判定
+        for td in td_blocks:
+            inner = td["inner"]
+            text_like = _inner_text_like(inner)
+            # 日付検出（テキスト優先、属性も補助）
+            day = _find_day_in_text(text_like)
+
+            if not day:
+                # 属性文字列からも探してみる
+                attr_text = " ".join([td.get("title", ""), td.get("aria", "")])
+                day = _find_day_in_text(attr_text)
+            if not day:
+                # <img alt/title> 内のテキストにも日付が含まれる場合がある
+                # 画像タグから属性抽出
+                for mm in re.finditer(r"<img\b([^>]*)>", inner, flags=re.IGNORECASE):
+                    img_attrs = mm.group(1) or ""
+                    alt = ""
+                    ititle = ""
+                    malt = re.search(r'alt\s*=\s*"([^"]*)"', img_attrs, flags=re.IGNORECASE)
+                    if malt: alt = malt.group(1) or ""
+                    mti = re.search(r'title\s*=\s*"([^"]*)"', img_attrs, flags=re.IGNORECASE)
+                    if mti: ititle = mti.group(1) or ""
+                    dd = _find_day_in_text(f"{alt} {ititle}")
+                    if dd:
+                        day = dd
+                        break
+
+            if not day:
+                # 日の無いセル（見出し/空セル等）はスキップ
+                continue
+
+            # ステータス推定（○/△/×）
+            st = _st_from_text_and_src(text_like, patterns)
+            if not st:
+                # 画像属性（alt/title/src）から補助判定
+                for mm in re.finditer(r"<img\b([^>]*)>", inner, flags=re.IGNORECASE):
+                    img_attrs = mm.group(1) or ""
+                    alt = ""
+                    ititle = ""
+                    src = ""
+                    malt = re.search(r'alt\s*=\s*"([^"]*)"', img_attrs, flags=re.IGNORECASE)
+                    if malt: alt = malt.group(1) or ""
+                    mti = re.search(r'title\s*=\s*"([^"]*)"', img_attrs, flags=re.IGNORECASE)
+                    if mti: ititle = mti.group(1) or ""
+                    msrc = re.search(r'src\s*=\s*"([^"]*)"', img_attrs, flags=re.IGNORECASE)
+                    if msrc: src = msrc.group(1) or ""
+                    st = _st_from_text_and_src(f"{alt} {ititle} {src}", patterns)
+                    if st:
+                        break
+
+            if not st:
+                # クラス名からの判定
+                st = _status_from_class(td.get("class", ""), css_class_patterns)
+
+            if not st:
+                st = "未判定"
+
+            summary[st] += 1
+            details.append({"day": day, "status": st, "text": text_like})
+
+        return summary, details
+
+def _summarize_vacancies_fallback(page, calendar_root, config):
+    """
+    旧ロジック（Playwright多回DOMアクセス）への安全フォールバック。
+    HTML取得に失敗した場合のみ使用。
+    """
+    with time_section("summarize_vacancies(fallback)"):
         import re as _re
         patterns = config["status_patterns"]
-        summary = {"○":0,"△":0,"×":0,"未判定":0}; details=[]
-        def _st(raw:str)->Optional[str]:
-            txt=(raw or "").strip(); n=txt.replace("　"," ").lower()
-            for ch in ["○","〇","△","×"]:
-                if ch in txt: return {"〇":"○"}.get(ch,ch)
-            for kw in patterns["circle"]:
-                if kw.lower() in n: return "○"
-            for kw in patterns["triangle"]:
-                if kw.lower() in n: return "△"
-            for kw in patterns["cross"]:
-                if kw.lower() in n: return "×"
-            return None
+        summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
+        details: List[Dict[str, str]] = []
+
+        def _st(raw: str) -> Optional[str]:
+            return _st_from_text_and_src(raw, patterns)
+
         cands = calendar_root.locator(":scope tbody td, :scope [role='gridcell']")
         for i in range(cands.count()):
             el = cands.nth(i)
-            try: txt=(el.inner_text() or "").strip()
-            except Exception: continue
-            head=txt[:40]
-            m=_re.search(r"^([1-9]|[12]\d|3[01])\s*日", head, flags=_re.MULTILINE)
+            try:
+                txt = (el.inner_text() or "").strip()
+            except Exception:
+                continue
+            head = txt[:40]
+            m = _re.search(r"^([1-9]|[12]\d|3[01])\s*日", head, flags=_re.MULTILINE)
             if not m:
                 try:
-                    aria=el.get_attribute("aria-label") or ""; title=el.get_attribute("title") or ""
-                    m=_re.search(r"([1-9]|[12]\d|3[01])\s*日", aria+" "+title)
-                except Exception: pass
+                    aria = el.get_attribute("aria-label") or ""
+                    title = el.get_attribute("title") or ""
+                    m = _re.search(r"([1-9]|[12]\d|3[01])\s*日", aria + " " + title)
+                except Exception:
+                    pass
             if not m:
                 try:
-                    imgs=el.locator("img"); jcnt=imgs.count()
+                    imgs = el.locator("img"); jcnt = imgs.count()
                     for j in range(jcnt):
-                        alt=imgs.nth(j).get_attribute("alt") or ""; tit=imgs.nth(j).get_attribute("title") or ""
-                        mm=_re.search(r"([1-9]|[12]\d|3[01])\s*日", alt+" "+tit)
-                        if mm: m=mm; break
-                except Exception: pass
-            if not m: continue
-            day=f"{m.group(0)}"; st=_st(txt)
+                        alt = imgs.nth(j).get_attribute("alt") or ""
+                        tit = imgs.nth(j).get_attribute("title") or ""
+                        mm = _re.search(r"([1-9]|[12]\d|3[01])\s*日", alt + " " + tit)
+                        if mm:
+                            m = mm
+                            break
+                except Exception:
+                    pass
+            if not m:
+                continue
+            day = f"{m.group(0)}"
+            st = _st(txt)
             if not st:
                 try:
-                    imgs=el.locator("img"); jcnt=imgs.count()
+                    imgs = el.locator("img"); jcnt = imgs.count()
                     for j in range(jcnt):
-                        alt=imgs.nth(j).get_attribute("alt") or ""; tit=imgs.nth(j).get_attribute("title") or ""; src=imgs.nth(j).get_attribute("src") or ""
-                        st=_st(alt+" "+tit) or _st(src)
-                        if st: break
-                except Exception: pass
+                        alt = imgs.nth(j).get_attribute("alt") or ""
+                        tit = imgs.nth(j).get_attribute("title") or ""
+                        src = imgs.nth(j).get_attribute("src") or ""
+                        st = _st(alt + " " + tit) or _st(src)
+                        if st:
+                            break
+                except Exception:
+                    pass
             if not st:
                 try:
-                    aria=el.get_attribute("aria-label") or ""; tit=el.get_attribute("title") or ""; cls=(el.get_attribute("class") or "").lower()
-                    st=_st(aria+" "+tit)
+                    aria = el.get_attribute("aria-label") or ""
+                    tit = el.get_attribute("title") or ""
+                    cls = (el.get_attribute("class") or "").lower()
+                    st = _st(aria + " " + tit)
                     if not st:
                         for kw in config["css_class_patterns"]["circle"]:
-                            if kw in cls: st="○"; break
+                            if kw in cls:
+                                st = "○"; break
                     if not st:
                         for kw in config["css_class_patterns"]["triangle"]:
-                            if kw in cls: st="△"; break
+                            if kw in cls:
+                                st = "△"; break
                     if not st:
                         for kw in config["css_class_patterns"]["cross"]:
-                            if kw in cls: st="×"; break
-                except Exception: pass
-            if not st: st="未判定"
-            summary[st]+=1; details.append({"day":day,"status":st,"text":txt})
+                            if kw in cls:
+                                st = "×"; break
+                except Exception:
+                    pass
+            if not st:
+                st = "未判定"
+            summary[st] += 1
+            details.append({"day": day, "status": st, "text": txt})
         return summary, details
 
 def facility_month_dir(short: str, month_text: str) -> Path:
