@@ -3,7 +3,7 @@
 """
 さいたま市 施設予約システムの空き状況監視（高速化＋安定化・施設一覧リユース版）
 - 入口（トップ→施設の空き状況→利用目的から→屋内スポーツ→バドミントン）は一度だけ通る
-- 各施設は「施設名リンククリック→当月＋月送り取得→『戻る』で施設一覧に復帰」を繰り返す
+- 各施設は「施設名リンククリック→当月＋月送り取得→『もどる』で施設一覧に復帰」を繰り返す
 - 待機を短縮：イベントレース（URL変化/特徴DOM）、カレンダー準備はセル数>=28判定（≤1.5s）＋ visible保険（300ms）
 - 任意：FAST_ROUTES=1 でフォント/解析のネットワークをブロック可能
 """
@@ -886,51 +886,111 @@ def enter_sports_badminton_flow(page, entry_labels: List[str]):
     """入口の共通パス（施設名を含まない 4 ステップ想定）"""
     click_sequence_fast(page, entry_labels)
 
-# ====== 施設一覧 へ戻る（多段フォールバック） ======
-def wait_facility_list_ready(page, timeout_ms=1200) -> bool:
-    deadline = time.perf_counter() + (timeout_ms / 1000.0)
-    selectors = [
-        "a:has-text('南浦和コミュニティセンター')",
-        "a:has-text('岩槻南部公民館')",
-        ".facility-list a",
+# ====== 施設一覧に戻れたかの判定強化 ======
+def _all_facility_names(config) -> List[str]:
+    try:
+        return [f.get("name","") for f in config.get("facilities", []) if f.get("name")]
+    except Exception:
+        return []
+
+def wait_facility_list_ready(page, config, timeout_ms=1500) -> bool:
+    """施設一覧に戻れたかどうかを複合判定（全施設名・一覧コンテナ・見出しテキスト）"""
+    names = _all_facility_names(config)
+    generic_markers = [
+        "バドミントン", "屋内スポーツ", "利用目的から",
+        "施設の空き状況", "検索条件", "結果一覧", "施設一覧",
     ]
+    selectors = [
+        ".facility-list a", ".results-grid a", ".list-area a",
+        "table a", "ul a", "ol a",
+    ]
+    deadline = time.perf_counter() + (timeout_ms / 1000.0)
     while time.perf_counter() < deadline:
+        # 1) 全施設名の部分一致（テキスト）
+        for nm in names:
+            try:
+                if page.get_by_text(nm, exact=False).count() > 0:
+                    return True
+            except Exception:
+                pass
+        # 2) 一覧コンテナ・リンク群
         for sel in selectors:
             try:
-                if page.locator(sel).count() > 0:
+                if page.locator(sel).count() >= 3:  # a が複数見える
+                    return True
+            except Exception:
+                pass
+        # 3) 見出しテキスト（パンくず・タイトル）
+        for mk in generic_markers:
+            try:
+                if page.get_by_text(mk, exact=False).count() > 0:
                     return True
             except Exception:
                 pass
         page.wait_for_timeout(120)
     return False
 
-def go_back_to_facility_list(page, timeout_ms=2000) -> bool:
-    labels = ["施設一覧に戻る", "検索結果に戻る", "一覧に戻る", "戻る"]
-    for lb in labels:
-        ok = try_click_text(page, lb, timeout_ms=800, quiet=True)
-        if ok and wait_facility_list_ready(page, timeout_ms=1200):
-            return True
-    # パンくず（あれば）
-    try:
-        bc = page.locator("nav.breadcrumb a").last
-        if bc and bc.count() > 0:
-            bc.click(timeout=800)
-            if wait_facility_list_ready(page, timeout_ms=1200):
-                return True
-    except Exception:
-        pass
-    # 最終手段：履歴戻り
-    try:
-        page.go_back(timeout=1000)
-        if wait_facility_list_ready(page, timeout_ms=1200):
-            return True
-    except Exception:
-        pass
-    print("[WARN] failed to return to facility list.", flush=True)
-    return False
+# ====== 施設一覧へ戻る（多段フォールバック & 最終手段は入口再実行） ======
+def go_back_to_facility_list(page, entry_labels: List[str], config, timeout_ms=2400) -> bool:
+    """一覧復帰の多段フォールバック（短い待機で素早く切替、ダメなら入口フロー再実行）"""
+    def list_ready() -> bool:
+        return wait_facility_list_ready(page, config, timeout_ms=1500)
+
+    with time_section("back to facility list"):
+        # 1) href で直叩き（最も確実）: gRsvWInstSrchMonthVacantBackAction
+        try:
+            back = page.locator("a[href*='gRsvWInstSrchMonthVacantBackAction']").first
+            if back.count() > 0:
+                back.scroll_into_view_if_needed()
+                back.click(timeout=800)
+                if list_ready(): return True
+        except Exception:
+            pass
+
+        # 2) ラベル「もどる」（全角）
+        try:
+            page.get_by_text("もどる", exact=True).click(timeout=800)
+            if list_ready(): return True
+        except Exception:
+            pass
+
+        # 3) パンくず（最後のリンク）
+        try:
+            bc = page.locator("nav.breadcrumb a").last
+            if bc and bc.count() > 0:
+                bc.click(timeout=800)
+                if list_ready(): return True
+        except Exception:
+            pass
+
+        # 4) 履歴戻り（ショートカット＋go_back 3回まで）
+        for _ in range(3):
+            try:
+                try: page.keyboard.press("Alt+Left")
+                except Exception: pass
+                try: page.keyboard.press("Meta+[")
+                except Exception: pass
+                try: page.go_back(timeout=800)
+                except Exception: pass
+                if list_ready(): return True
+            except Exception:
+                pass
+
+        # 5) 最終手段：入口フローを再実行（確実復帰）
+        try:
+            print("[WARN] fallback: re-entering entry flow for facility list...", flush=True)
+            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=20000)
+            click_optional_dialogs_fast(page)
+            enter_sports_badminton_flow(page, entry_labels)
+            if list_ready(): return True
+        except Exception:
+            pass
+
+        print("[WARN] failed to return to facility list.", flush=True)
+        return False
 
 # ====== 施設を選択→当月＋月送り→戻る（1施設分のメイン処理） ======
-def process_facility_from_list(page, facility: Dict[str, Any], config):
+def process_facility_from_list(page, facility: Dict[str, Any], config, entry_labels: List[str]):
     fname = facility.get("name", "")
     short = FACILITY_TITLE_ALIAS.get(fname, fname) or fname
     print(f"[INFO] select facility: {fname}", flush=True)
@@ -1027,11 +1087,10 @@ def process_facility_from_list(page, facility: Dict[str, Any], config):
         cal_root = cal_root2
         prev_month_text = month_text2
 
-    # 5) 施設一覧に戻る
-    with time_section("back to facility list"):
-        ok_back = go_back_to_facility_list(page, timeout_ms=2000)
-        if not ok_back:
-            raise RuntimeError("施設一覧への復帰に失敗")
+    # 5) 施設一覧に戻る（強化版）
+    ok_back = go_back_to_facility_list(page, entry_labels, config, timeout_ms=2400)
+    if not ok_back:
+        raise RuntimeError("施設一覧への復帰に失敗")
 
 # ====== メインフロー ======
 def run_monitor():
@@ -1079,7 +1138,7 @@ def run_monitor():
         # 施設を順に処理（一覧を使い回す）
         for facility in facilities:
             try:
-                process_facility_from_list(page, facility, config)
+                process_facility_from_list(page, facility, config, entry_labels)
             except Exception as e:
                 dbg = OUTPUT_ROOT / "_debug"; safe_mkdir(dbg)
                 short = FACILITY_TITLE_ALIAS.get(facility.get("name",""), facility.get("name","")) or facility.get("name","")
