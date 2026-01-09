@@ -280,19 +280,11 @@ def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
         # 入口クリック列（具体条件待ちに変更）
         click_sequence_fast(page, facility.get("click_sequence", []))
 
-    # ★追加：最後のクリック後は「次ラベル」が無いので、カレンダー枠の出現を明示的に待つ
-    with time_section("wait calendar root visible"):
-        sel_cfg = facility.get("calendar_selector") or "table.reservation-calendar"
-        try:
-            page.locator(sel_cfg).first.wait_for(state="visible", timeout=8000)
-        except Exception:
-            # ヒューリスティック候補で保険待機
-            for alt in ["[role='grid']", "table.reservation-calendar", "table"]:
-                try:
-                    page.locator(alt).first.wait_for(state="visible", timeout=4000)
-                    break
-                except Exception:
-                    continue
+   
+    # 以前の「wait calendar root visible（合計最大 ~20s）」を廃止し、
+    # こちらの短時間レースで待つ
+    wait_calendar_ready(page, facility)
+
 
 def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
     pat = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
