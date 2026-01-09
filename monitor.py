@@ -2,17 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 さいたま市 施設予約システムの空き状況監視（計測＋任意ダイアログ高速版）
+改良点:
+- 任意ダイアログ（同意/OK/確認/閉じる）の超軽量処理
+- 既定タイムアウト短縮（page.set_default_timeout(5000)）
+- 月遷移の成功判定を「月テキスト変化」のみで高速化
+- ①アダプティブ待機（初期200ms＋セル数検知、上限GRACE_MS既定1000ms）
+- ② summarize_vacancies を HTML一括パース（Playwright DOMアクセス最小化）
+- ★ 差分検知（セル単位）＋ Discord通知（集約タイプ、Embed→403時テキストフォールバック）
 
-主な機能:
-- goto直後の任意ダイアログ（同意/OK/確認/閉じる）を超軽量で処理
-- 既定タイムアウトを5秒に短縮（page.set_default_timeout(5000)）
-- 月遷移の成功判定は「月テキスト変化」のみ（outerHTML待ちは廃止）
-- ① アダプティブ待機（初期200ms＋セル数検知、上限GRACE_MS既定1000ms）
-- ② summarize_vacancies を HTML一括パース化（Playwright DOMアクセス最小化）
-- ★ 差分検知（セル単位）＋ Discord通知（集約タイプ）
-    改善遷移 = ×→△, △→○, ×→○, 未判定→△, 未判定→○
-    通知タイトル = 施設略語 + 月（例: 南浦和 2026年2月）
-    通知本文     = YYYY年M月D日 (曜・祝) : 前回 → 今回（ゼロパディングなし）
+通知仕様（改善判定）:
+改善遷移 = ×→△, △→○, ×→○, 未判定→△, 未判定→○
+通知タイトル = 施設略語 + 月（例: 南浦和 2026年2月）
+通知本文 = YYYY年M月D日 (曜・祝) : 前回 → 今回（ゼロパディングなし）
 """
 
 import os
@@ -31,7 +32,6 @@ try:
     import pytz
 except Exception:
     pytz = None
-
 # 祝日判定（任意導入）
 try:
     import jpholiday  # pip install jpholiday が必要
@@ -40,19 +40,16 @@ except Exception:
 
 BASE_URL = os.getenv("BASE_URL")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
 MONITOR_FORCE = os.getenv("MONITOR_FORCE", "0").strip() == "1"
 MONITOR_START_HOUR = int(os.getenv("MONITOR_START_HOUR", "5"))
 MONITOR_END_HOUR = int(os.getenv("MONITOR_END_HOUR", "23"))
 TIMING_VERBOSE = os.getenv("TIMING_VERBOSE", "0").strip() == "1"
-
-# 安定化猶予上限（ミリ秒）: 既定 1000ms（環境変数 GRACE_MS で変更可）
+# 安定化猶予上限（ミリ秒）：既定 1000ms（環境変数 GRACE_MS で変更可）
 GRACE_MS_DEFAULT = 1000
 try:
     GRACE_MS = max(0, int(os.getenv("GRACE_MS", str(GRACE_MS_DEFAULT))))
 except Exception:
     GRACE_MS = GRACE_MS_DEFAULT
-
 # 祝日表示のON/OFF（祝日名は出さない仕様）
 INCLUDE_HOLIDAY_FLAG = os.getenv("DISCORD_INCLUDE_HOLIDAY", "1").strip() == "1"
 
@@ -121,9 +118,9 @@ def safe_element_screenshot(el, out: Path):
 def grace_pause(page, label: str = "grace wait"):
     """
     アダプティブ安定化待機（上限厳守版）:
-      - 初期 200ms
-      - 以降 200ms 間隔で calendar のセル数 >=28 を検知したら即抜け
-      - 上限は GRACE_MS（既定 1000ms）を厳密に超えない
+    - 初期 200ms
+    - 以降 200ms 間隔で calendar のセル数 >=28 を検知したら即抜け
+    - 上限は GRACE_MS（既定 1000ms）を厳密に超えない
     """
     ms_cap = GRACE_MS if isinstance(GRACE_MS, int) else GRACE_MS_DEFAULT
     if ms_cap <= 0:
@@ -213,16 +210,14 @@ def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
     with time_section("goto BASE_URL"):
         page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_load_state("domcontentloaded", timeout=30000)
-    page.set_default_timeout(5000)
-    click_optional_dialogs_fast(page)
-
+        page.set_default_timeout(5000)
+        click_optional_dialogs_fast(page)
     for label in facility.get("click_sequence", []):
         with time_section(f"click_sequence: '{label}'"):
             ok = try_click_text(page, label, timeout_ms=5000)
             if not ok:
-                raise RuntimeError(f"クリック対象が見つかりません：『{label}』（施設: {facility.get('name','')}）")
-
-    grace_pause(page, label="after availability view shown")
+                raise RuntimeError(f"クリック対象が見つかりません：『{label}』（施設: {facility.get('name','')})")
+            grace_pause(page, label="after availability view shown")
 
 def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
     pat = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
@@ -251,7 +246,6 @@ def locate_calendar_root(page, hint: str, facility: Dict[str, Any] = None):
             loc = page.locator(sel_cfg)
             if loc.count() > 0:
                 return loc.first
-
         candidates = []
         weekday_markers = ["日曜日","月曜日","火曜日","水曜日","木曜日","金曜日","土曜日","日","月","火","水","木","金","土"]
         for sel in ["[role='grid']", "table", "section", "div.calendar", "div"]:
@@ -360,7 +354,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
                     _safe_click(chosen, f"href {chosen_date}"); clicked = True
             except Exception: pass
 
-        if not clicked: return False
+    if not clicked: return False
 
     with time_section("next-month: wait month text change (+1)"):
         goal = _compute_next_month_text(prev_month_text or "")
@@ -370,7 +364,8 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
                     """(g)=>{ return document.body.innerText.includes(g); }""",
                     arg=goal, timeout=wait_timeout_ms
                 )
-        except Exception: pass
+        except Exception:
+            pass
 
     with time_section("next-month: confirm direction"):
         cur = None
@@ -444,7 +439,7 @@ def _inner_text_like(html_fragment: str) -> str:
     return s.strip()
 
 def _find_day_in_text(text: str) -> Optional[str]:
-    m = re.search(r"([1-9]|[12]\d|3[01])\s*日", text)
+    m = re.search(r"([1-9]|1\d|2\d|3[01])\s*日", text)
     return m.group(0) if m else None
 
 def summarize_vacancies(page, calendar_root, config):
@@ -453,7 +448,6 @@ def summarize_vacancies(page, calendar_root, config):
         css_class_patterns = config["css_class_patterns"]
         summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
         details: List[Dict[str, str]] = []
-
         html = ""
         try:
             html = calendar_root.evaluate("el => el.outerHTML")
@@ -461,16 +455,13 @@ def summarize_vacancies(page, calendar_root, config):
             return _summarize_vacancies_fallback(page, calendar_root, config)
 
         td_blocks = _extract_td_blocks(html)
-
         for td in td_blocks:
             inner = td["inner"]
             text_like = _inner_text_like(inner)
             day = _find_day_in_text(text_like)
-
             if not day:
                 attr_text = " ".join([td.get("title", ""), td.get("aria", "")])
                 day = _find_day_in_text(attr_text)
-
             if not day:
                 for mm in re.finditer(r"<img\b([^>]*)>", inner, flags=re.IGNORECASE):
                     img_attrs = mm.group(1) or ""
@@ -484,7 +475,6 @@ def summarize_vacancies(page, calendar_root, config):
                     if dd:
                         day = dd
                         break
-
             if not day:
                 continue
 
@@ -504,10 +494,8 @@ def summarize_vacancies(page, calendar_root, config):
                     st = _st_from_text_and_src(f"{alt} {ititle} {src}", patterns)
                     if st:
                         break
-
             if not st:
                 st = _status_from_class(td.get("class", ""), css_class_patterns)
-
             if not st:
                 st = "未判定"
 
@@ -522,8 +510,10 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
         patterns = config["status_patterns"]
         summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
         details: List[Dict[str, str]] = []
+
         def _st(raw: str) -> Optional[str]:
             return _st_from_text_and_src(raw, patterns)
+
         cands = calendar_root.locator(":scope tbody td, :scope [role='gridcell']")
         for i in range(cands.count()):
             el = cands.nth(i)
@@ -532,12 +522,12 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
             except Exception:
                 continue
             head = txt[:40]
-            m = _re.search(r"^([1-9]|[12]\d|3[01])\s*日", head, flags=_re.MULTILINE)
+            m = _re.search(r"^([1-9]|1\d|2\d|3[01])\s*日", head, flags=_re.MULTILINE)
             if not m:
                 try:
                     aria = el.get_attribute("aria-label") or ""
                     title = el.get_attribute("title") or ""
-                    m = _re.search(r"([1-9]|[12]\d|3[01])\s*日", aria + " " + title)
+                    m = _re.search(r"([1-9]|1\d|2\d|3[01])\s*日", aria + " " + title)
                 except Exception:
                     pass
             if not m:
@@ -546,7 +536,7 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
                     for j in range(jcnt):
                         alt = imgs.nth(j).get_attribute("alt") or ""
                         tit = imgs.nth(j).get_attribute("title") or ""
-                        mm = _re.search(r"([1-9]|[12]\d|3[01])\s*日", alt + " " + tit)
+                        mm = _re.search(r"([1-9]|1\d|2\d|3[01])\s*日", alt + " " + tit)
                         if mm:
                             m = mm
                             break
@@ -555,6 +545,7 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
             if not m:
                 continue
             day = f"{m.group(0)}"
+
             st = _st(txt)
             if not st:
                 try:
@@ -578,20 +569,22 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
                         for kw in config["css_class_patterns"]["circle"]:
                             if kw in cls:
                                 st = "○"; break
-                    if not st:
-                        for kw in config["css_class_patterns"]["triangle"]:
-                            if kw in cls:
-                                st = "△"; break
-                    if not st:
-                        for kw in config["css_class_patterns"]["cross"]:
-                            if kw in cls:
-                                st = "×"; break
+                        if not st:
+                            for kw in config["css_class_patterns"]["triangle"]:
+                                if kw in cls:
+                                    st = "△"; break
+                        if not st:
+                            for kw in config["css_class_patterns"]["cross"]:
+                                if kw in cls:
+                                    st = "×"; break
                 except Exception:
                     pass
             if not st:
                 st = "未判定"
+
             summary[st] += 1
             details.append({"day": day, "status": st, "text": txt})
+
         return summary, details
 
 def facility_month_dir(short: str, month_text: str) -> Path:
@@ -626,8 +619,10 @@ def save_calendar_assets(cal_root, outdir: Path, save_ts: bool):
     ts = _dt.now().strftime("%Y%m%d_%H%M%S")
     html_ts = outdir / f"calendar_{ts}.html"
     png_ts = outdir / f"calendar_{ts}.png"
+
     dump_calendar_html(cal_root, latest_html)
     take_calendar_screenshot(cal_root, latest_png)
+
     ts_html=ts_png=None
     if save_ts:
         dump_calendar_html(cal_root, html_ts)
@@ -635,8 +630,7 @@ def save_calendar_assets(cal_root, outdir: Path, save_ts: bool):
         ts_html, ts_png = html_ts, png_ts
     return latest_html, latest_png, ts_html, ts_png
 
-# ====== 差分（セル単位の改善）＋ Discord 集約通知 ======
-
+# ====== 差分（セル単位の改善）＋ 祝日表示ユーティリティ ======
 IMPROVE_TRANSITIONS = {
     ("×", "△"), ("△", "○"), ("×", "○"), ("未判定", "△"), ("未判定", "○")
 }
@@ -647,7 +641,7 @@ def _parse_month_text(month_text: str) -> Optional[Tuple[int, int]]:
     return int(m.group(1)), int(m.group(2))
 
 def _day_str_to_int(day_str: str) -> Optional[int]:
-    m = re.search(r"([1-9]|[12]\d|3[01])\s*日", day_str or "")
+    m = re.search(r"([1-9]|1\d|2\d|3[01])\s*日", day_str or "")
     return int(m.group(1)) if m else None
 
 def _weekday_jp(dt: datetime.date) -> str:
@@ -658,7 +652,7 @@ def _is_japanese_holiday(dt: datetime.date) -> bool:
     if not INCLUDE_HOLIDAY_FLAG:
         return False
     if jpholiday is None:
-        # jpholidayが未導入なら祝日判定はスキップ（「祝」表示なし）
+        # jpholidayが未導入なら祝日判定はスキップ（「・祝」表示なし）
         return False
     try:
         return jpholiday.is_holiday(dt)
@@ -666,7 +660,9 @@ def _is_japanese_holiday(dt: datetime.date) -> bool:
         return False
 
 def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cur_details: List[Dict[str,str]]) -> List[str]:
-    """改善セルを抽出し、'YYYY年M月D日 (曜[・祝]) : 前回 → 今回' の行を返す（昇順）。"""
+    """
+    改善セルを抽出し、'YYYY年M月D日 (曜[・祝]) : 前回 → 今回' の行を返す（昇順）。
+    """
     ym = _parse_month_text(month_text)
     if not ym: return []
     y, mo = ym
@@ -674,12 +670,10 @@ def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cu
     # 前回/今回の day→status マップ
     prev_map: Dict[int, str] = {}
     cur_map: Dict[int, str] = {}
-
     for d in (prev_details or []):
         di = _day_str_to_int(d.get("day",""))
         if di is not None:
             prev_map[di] = d.get("status","未判定")
-
     for d in (cur_details or []):
         di = _day_str_to_int(d.get("day",""))
         if di is not None:
@@ -699,53 +693,195 @@ def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cu
             # ゼロパディングなし
             line = f"{y}年{mo}月{di}日 ({wd_part}) : {prev_st} → {cur_st}"
             lines.append(line)
-
     return lines
 
-def send_discord_notification_aggregate(webhook_url: Optional[str], facility_alias: str, month_text: str, lines: List[str]):
-    """施設×月の改善セルを集約してDiscordに送信（画像なし、Embedのみ）。"""
-    if not webhook_url or not lines:
-        return
-    try:
-        import urllib.request
-        import urllib.error
-        import ssl
+# ======================================================================
+# Discord通知（完全対応版：Embed→403時テキストフォールバック／長文分割／429リトライ／詳細本文ログ）
+# ======================================================================
 
-        title = f"{facility_alias} {month_text}"  # 例: 南浦和 2026年2月
-        description = "\n".join(lines)
+DISCORD_CONTENT_LIMIT = 2000          # content の最大文字数
+DISCORD_EMBED_DESC_LIMIT = 4096       # embed.description 上限
 
+def _split_content(s: str, limit: int = DISCORD_CONTENT_LIMIT) -> List[str]:
+    """Discordのcontent上限に合わせて安全に分割。改行優先・語切れ緩和。"""
+    out: List[str] = []
+    cur = (s or "").strip()
+    while len(cur) > limit:
+        cut = cur.rfind("\n", 0, limit)
+        if cut < 0:
+            cut = cur.rfind(" ", 0, limit)
+        if cut < 0:
+            cut = limit
+        out.append(cur[:cut].rstrip())
+        cur = cur[cut:].lstrip()
+    if cur:
+        out.append(cur)
+    return out
+
+def _truncate_embed_description(desc: str) -> str:
+    if desc is None:
+        return ""
+    if len(desc) <= DISCORD_EMBED_DESC_LIMIT:
+        return desc
+    return desc[:DISCORD_EMBED_DESC_LIMIT - 3] + "..."
+
+class DiscordWebhookClient:
+    def __init__(self, webhook_url: str,
+                 thread_id: Optional[str] = None,
+                 wait: bool = True,
+                 user_agent: Optional[str] = None,
+                 timeout_sec: int = 10):
+        if not webhook_url:
+            raise ValueError("webhook_url is required")
+        self.webhook_url = webhook_url
+        self.thread_id = thread_id
+        self.wait = wait
+        self.timeout_sec = timeout_sec
+        self.user_agent = user_agent or "facility-monitor/1.0 (+python-urllib)"
+
+    @staticmethod
+    def from_env() -> "DiscordWebhookClient":
+        url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+        th = os.getenv("DISCORD_THREAD_ID", "").strip() or None
+        wt = os.getenv("DISCORD_WAIT", "1").strip() == "1"
+        ua = os.getenv("DISCORD_USER_AGENT", "").strip() or None
+        return DiscordWebhookClient(webhook_url=url, thread_id=th, wait=wt, user_agent=ua)
+
+    def _post(self, payload: Dict[str, Any]) -> Tuple[int, str, Dict[str, Any]]:
+        import urllib.request, urllib.error, ssl
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        # URL クエリの組み立て
+        url = self.webhook_url
+        params = []
+        if self.wait:
+            params.append("wait=true")
+        if self.thread_id:
+            params.append(f"thread_id={self.thread_id}")
+        if params:
+            url = f"{url}?{'&'.join(params)}"
+
+        req = urllib.request.Request(url=url, data=data,
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": self.user_agent})
+        ctx = ssl.create_default_context()
+
+        tries = 0
+        max_tries = 3
+        while True:
+            tries += 1
+            try:
+                with urllib.request.urlopen(req, context=ctx, timeout=self.timeout_sec) as resp:
+                    body = resp.read().decode("utf-8", errors="ignore")
+                    status = getattr(resp, "status", 200)
+                    headers = dict(resp.headers) if resp.headers else {}
+                    return status, body, headers
+            except urllib.error.HTTPError as e:
+                status = e.code
+                try:
+                    body = e.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    body = ""
+                headers = dict(e.headers) if e.headers else {}
+                if status == 429 and tries < max_tries:
+                    retry_after = float(headers.get("Retry-After", "1.0"))
+                    print(f"[WARN] Discord 429: retry_after={retry_after}s; body={body}", flush=True)
+                    time.sleep(max(0.5, retry_after))
+                    continue
+                return status, body, headers
+            except Exception as e:
+                return -1, f"Exception: {e}", {}
+
+    def send_embed(self, title: str, description: str,
+                   color: int = 0x00B894,
+                   footer_text: str = "Facility monitor") -> bool:
         embed = {
             "title": title,
-            "description": description,
-            "color": 0x00B894,  # 緑系
+            "description": _truncate_embed_description(description or ""),
+            "color": color,
             "timestamp": jst_now().isoformat(),
-            "footer": {"text": "Facility monitor"},
+            "footer": {"text": footer_text},
         }
-
         payload = {"embeds": [embed]}
-        data = json.dumps(payload).encode("utf-8")
+        status, body, headers = self._post(payload)
+        if status in (200, 204):
+            print(f"[INFO] Discord notified (embed): title='{title}' len={len(description or '')} body={body}", flush=True)
+            return True
 
-        req = urllib.request.Request(
-            webhook_url,
-            data=data,
-            headers={"Content-Type": "application/json"}
-        )
-        ctx = ssl.create_default_context()
-        with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-            _ = resp.read()
-        print(f"[INFO] Discord notified (aggregate): {facility_alias} {month_text} ({len(lines)} improvements)", flush=True)
-    except Exception as e:
-        print(f"[WARN] send_discord_notification_aggregate failed: {e}", flush=True)
+        # 403 等 → テキストフォールバック
+        print(f"[WARN] Embed failed: HTTP {status}; body={body}. Falling back to plain text.", flush=True)
+        text = f"**{title}**\n{description or ''}"
+        return self.send_text(text)
+
+    def send_text(self, content: str) -> bool:
+        pages = _split_content(content or "", limit=DISCORD_CONTENT_LIMIT)
+        ok_all = True
+        for i, page in enumerate(pages, 1):
+            payload = {"content": page}
+            status, body, headers = self._post(payload)
+            if status in (200, 204):
+                print(f"[INFO] Discord notified (text p{i}/{len(pages)}): {len(page)} chars body={body}", flush=True)
+            else:
+                ok_all = False
+                print(f"[ERROR] Discord text failed (p{i}/{len(pages)}): HTTP {status} body={body}", flush=True)
+        return ok_all
+
+def send_aggregate_lines(webhook_url: Optional[str],
+                         facility_alias: str,
+                         month_text: str,
+                         lines: List[str]) -> None:
+    """
+    施設×月の改善セル一覧をDiscordへ通知。
+    - Embed優先、失敗時はテキストへ自動フォールバック
+    - 空の lines は投稿しない
+    環境変数:
+      - DISCORD_FORCE_TEXT: "1" なら常にテキスト
+      - DISCORD_THREAD_ID: Forum/スレッド投稿先が必要な場合の thread_id
+      - DISCORD_WAIT: "1" でレスポンス本文取得（デフォルトON）
+      - DISCORD_MAX_LINES: 行数上限（長文抑制）
+      - DISCORD_USER_AGENT: 任意UA
+    """
+    if not webhook_url:
+        return
+    if not lines:
+        return
+
+    force_text = (os.getenv("DISCORD_FORCE_TEXT", "0").strip() == "1")
+    max_lines_env = os.getenv("DISCORD_MAX_LINES", "").strip()
+    max_lines = None
+    try:
+        if max_lines_env:
+            max_lines = max(1, int(max_lines_env))
+    except Exception:
+        max_lines = None
+    if max_lines is not None and len(lines) > max_lines:
+        lines = lines[:max_lines] + [f"... ほか {len(lines) - max_lines} 件"]
+
+    title = f"{facility_alias} {month_text}"
+    description = "\n".join(lines)
+
+    client = DiscordWebhookClient.from_env()
+    # from_env は DISCORD_WEBHOOK_URL を参照するが、明示引数を優先
+    client.webhook_url = webhook_url
+
+    if force_text:
+        content = f"**{title}**\n{description}"
+        client.send_text(content)
+        return
+
+    client.send_embed(title=title, description=description, color=0x00B894, footer_text="Facility monitor")
 
 # ====== メイン ======
 def run_monitor():
     print("[INFO] run_monitor: start", flush=True)
     print(f"[INFO] BASE_DIR={BASE_DIR} cwd={Path.cwd()} OUTPUT_ROOT={OUTPUT_ROOT}", flush=True)
     with time_section("ensure_root_dir"): ensure_root_dir(OUTPUT_ROOT)
+
     try:
         with time_section("load_config"): config = load_config()
     except Exception as e:
         print(f"[ERROR] config load failed: {e}", flush=True); return
+
     facilities = config.get("facilities", [])
     if not facilities:
         print("[WARN] config['facilities'] が空です。", flush=True); return
@@ -787,6 +923,7 @@ def run_monitor():
                 }
                 with time_section("write status_counts.json"):
                     safe_write_text(outdir / "status_counts.json", json.dumps(payload, ensure_ascii=False, indent=2))
+
                 print(f"[INFO] summary({facility.get('name','')} - {month_text}): ○={summary['○']} △={summary['△']} ×={summary['×']} 未判定={summary['未判定']}", flush=True)
                 if ts_html and ts_png: print(f"[INFO] saved (timestamped): {ts_html.name}, {ts_png.name}", flush=True)
                 print(f"[INFO] saved: {facility.get('name','')} - {month_text} latest=({latest_html.name},{latest_png.name})", flush=True)
@@ -794,7 +931,7 @@ def run_monitor():
                 # ★ 集約通知（当月）
                 lines = build_aggregate_lines(month_text, prev_details, details)
                 if lines:
-                    send_discord_notification_aggregate(DISCORD_WEBHOOK_URL, short, month_text, lines)
+                    send_aggregate_lines(DISCORD_WEBHOOK_URL, short, month_text, lines)
 
                 # ---- 月遷移ループ ----
                 shifts = facility.get("month_shifts", [0,1])
@@ -836,6 +973,7 @@ def run_monitor():
                         }
                         with time_section("write status_counts.json (step)"):
                             safe_write_text(outdir2 / "status_counts.json", json.dumps(payload2, ensure_ascii=False, indent=2))
+
                         print(f"[INFO] summary({facility.get('name','')} - {month_text2}): ○={summary2['○']} △={summary2['△']} ×={summary2['×']} 未判定={summary2['未判定']}", flush=True)
                         if ts_html2 and ts_png2: print(f"[INFO] saved (timestamped): {ts_html2.name}, {ts_png2.name}", flush=True)
                         print(f"[INFO] saved: {facility.get('name','')} - {month_text2} latest=({latest_html2.name},{latest_png2.name})", flush=True)
@@ -843,7 +981,7 @@ def run_monitor():
                         # ★ 集約通知（遷移先の月）
                         lines2 = build_aggregate_lines(month_text2, prev_details2, details2)
                         if lines2:
-                            send_discord_notification_aggregate(DISCORD_WEBHOOK_URL, short, month_text2, lines2)
+                            send_aggregate_lines(DISCORD_WEBHOOK_URL, short, month_text2, lines2)
 
                     cal_root = cal_root2; prev_month_text = month_text2
 
@@ -871,6 +1009,7 @@ def main():
 
     force = MONITOR_FORCE or args.force
     within, now = is_within_monitoring_window(MONITOR_START_HOUR, MONITOR_END_HOUR)
+
     if not force:
         if now: print(f"[INFO] JST now: {now.strftime('%Y-%m-%d %H:%M:%S')} (window {MONITOR_START_HOUR}:00-{MONITOR_END_HOUR}:59)", flush=True)
         if not within: print("[INFO] outside monitoring window. exit.", flush=True); sys.exit(0)
