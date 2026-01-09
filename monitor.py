@@ -637,19 +637,29 @@ print(
 
                     if step in shifts:
                         outdir2 = facility_month_dir(fshort or 'unknown_facility', month_text2)
-                        dump_calendar_html(cal_root2, outdir2 / 'calendar.html')
-                        take_calendar_screenshot(cal_root2, outdir2 / 'calendar.png')
-                        print(f"[INFO] saved: {facility.get('name','')} - {month_text2}", flush=True)
+                        
+summary2, details2 = summarize_vacancies(page, cal_root2, config)
 
-                        # ★ 各月の空き状況集計
-                        try:
-                            summary2, details2 = summarize_vacancies(page, cal_root2, config)
-                            (outdir2 / "status_counts.json").write_text(
-                                json.dumps({"month": month_text2, "facility": facility.get('name',''),
-                                            "summary": summary2, "details": details2},
-                                           ensure_ascii=False, indent=2),
-                                "utf-8"
-                            )
+prev_summary2 = load_last_summary(outdir2)
+changed2 = summaries_changed(prev_summary2, summary2)
+
+save_calendar_assets(cal_root2, outdir2, save_timestamped=changed2)
+
+(outdir2 / "status_counts.json").write_text(
+    json.dumps(
+        {"month": month_text2, "facility": facility.get('name',''),
+         "summary": summary2, "details": details2},
+        ensure_ascii=False, indent=2
+    ),
+    "utf-8"
+)
+
+print(
+    f"[INFO] summary({facility.get('name','')} - {month_text2}): "
+    f"○={summary2['○']} △={summary2['△']} ×={summary2['×']} 未判定={summary2['未判定']}",
+    flush=True
+)
+
                             import csv
                             with (outdir2 / "status_details.csv").open("w", newline="", encoding="utf-8") as fcsv:
                                 w = csv.writer(fcsv)
