@@ -10,30 +10,26 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-
     concurrency:
       group: facility-monitor
       cancel-in-progress: false
-
     env:
       PYTHONUNBUFFERED: "1"
       OUTPUT_DIR: snapshots
       PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
-      # ★ 追加：ジョブ共通 env に Webhook を渡す（診断や本処理で参照可能）
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      # ★ ここを 600ms に短縮（保険用の上限）
+      GRACE_MS: "600"
 
     steps:
-      # --- リポジトリチェックアウト ---
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- Python をセットアップ ---
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # --- pip キャッシュ ---
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -42,41 +38,35 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # --- Playwright ブラウザのキャッシュ用ディレクトリを事前作成 ---
       - name: Prepare Playwright cache dir
         run: mkdir -p ~/.cache/ms-playwright
 
-      # --- 依存のインストール（Playwright 本体も） ---
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # Playwright 本体が requirements.txt に無ければフォールバックで入れる（バージョン固定推奨）
           python - <<'PY'
           import subprocess, sys
           try:
-              import playwright  # noqa
-              print("[INFO] playwright package is present.")
+            import playwright  # noqa
+            print("[INFO] playwright package is present.")
           except Exception:
-              print("[INFO] playwright not found; installing pinned version...")
-              subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright==1.46.0"])
+            print("[INFO] playwright not found; installing pinned version...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright==1.46.0"])
           PY
 
-      # --- Playwright バージョンに応じたキャッシュキーを生成 ---
       - name: Compute Playwright cache key
         id: pw
         shell: bash
         run: |
           set -e
-          # 1) importlib.metadata から取得（標準）
           PW_VER=$(python - <<'PY'
+          import importlib.metadata as m
           try:
-              import importlib.metadata as m
-              print(m.version("playwright"))
+            print(m.version("playwright"))
           except Exception:
-              print("")
+            print("")
           PY
           )
-          # 2) フォールバック: pip show
           if [ -z "${PW_VER}" ]; then
             PW_VER=$(python -m pip show playwright | awk '/Version:/ {print $2}')
           fi
@@ -87,7 +77,6 @@ jobs:
           echo "Playwright version: ${PW_VER}"
           echo "version=${PW_VER}" >> "$GITHUB_OUTPUT"
 
-      # --- Playwright ブラウザのキャッシュ（バージョン連動） ---
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -97,7 +86,6 @@ jobs:
             ${{ runner.os }}-msplaywright-
           save-always: true
 
-      # --- 既にブラウザがあるか確認して、あれば install スキップ ---
       - name: Check cached browsers
         id: have_browsers
         shell: bash
@@ -110,13 +98,11 @@ jobs:
             echo "[INFO] No cached Chromium browsers found; will install."
           fi
 
-      # --- Playwright ブラウザのインストール（初回のみ） ---
       - name: Install Playwright browsers (Chromium)
         if: steps.have_browsers.outputs.found == 'false'
         run: |
           python -m playwright install chromium
 
-      # --- ワークスペース情報（任意のデバッグ） ---
       - name: Show workspace info
         run: |
           echo "PWD=$(pwd)"
@@ -125,62 +111,55 @@ jobs:
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           python --version
 
-      # --- Git の safe.directory 設定（権限警告の回避） ---
       - name: Git safe.directory
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      # --- config.json の整合性チェック ---
       - name: Validate config.json
         run: |
           python -m json.tool config.json > /dev/null
-     
-      # --- 監視実行（レポジトリ直下 snapshots/ に保存） ---
+
       - name: Run monitor (force)
         env:
           OUTPUT_DIR: ${{ env.OUTPUT_DIR }}
           BASE_URL: ${{ secrets.BASE_URL }}
-          # ★ ここでも渡すが、ジョブ共通envに既に設定済み
           DISCORD_WEBHOOK_URL: ${{ env.DISCORD_WEBHOOK_URL }}
           MONITOR_FORCE: "1"
-          GRACE_MS: "1500"
+          # 入口・月遷移の「具体条件待ち」へ移行済み。保険の上限のみ 600ms。
+          GRACE_MS: ${{ env.GRACE_MS }}
         run: |
           echo "[INFO] Starting monitor.py ..."
           python -u monitor.py --force
           echo "[INFO] monitor.py finished."
 
-      # --- 生成物の一覧（更新日時/サイズ付きで詳細表示） ---
       - name: Show snapshot files (detailed)
         run: |
           echo "----- snapshots tree -----"
-          find "${OUTPUT_DIR}" -type f -printf "%T@ %TY-%Tm-%Td %TH:%TM:%TS %p %s bytes\n" | sort -n || true
+          find "${{ env.OUTPUT_DIR }}" -type f -printf "%T@ %TY-%Tm-%Td %TH:%TM:%TS %p %s bytes\n" | sort -n || true
           echo "----- git status/diff -----"
-          git status "${OUTPUT_DIR}/" || true
-          git diff --name-only "${OUTPUT_DIR}/" || true
+          git status "${{ env.OUTPUT_DIR }}/" || true
+          git diff --name-only "${{ env.OUTPUT_DIR }}/" || true
 
-      # --- .gitignore で無視されていないか確認＆強制追加 ---
       - name: Ensure snapshots tracked by Git
         run: |
           echo "----- git check-ignore -----"
-          git check-ignore -v "${OUTPUT_DIR}" "${OUTPUT_DIR}/**" || true
-          git add -f "${OUTPUT_DIR}/" || true
+          git check-ignore -v "${{ env.OUTPUT_DIR }}" "${{ env.OUTPUT_DIR }}/**" || true
+          git add -f "${{ env.OUTPUT_DIR }}/" || true
 
-      # --- Commit & Push （差分が無ければ空コミットで履歴を残す） ---
       - name: Commit & Push snapshot updates
         run: |
           set -e
-          if [[ -n "$(git status --porcelain "${OUTPUT_DIR}/")" ]]; then
+          if [[ -n "$(git status --porcelain "${{ env.OUTPUT_DIR }}/")" ]]; then
             git commit -m "chore: update snapshots ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))"
             git push
           else
-            echo "No changes detected in ${OUTPUT_DIR}/; creating an empty commit for run history."
+            echo "No changes detected in ${{ env.OUTPUT_DIR }}/; creating an empty commit for run history."
             git commit -m "chore: run without snapshot changes ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))" --allow-empty || true
             git push || true
           fi
 
-      # --- Artifacts にも保存（GUIから直接ダウンロード可能） ---
       - name: Upload snapshots artifact
         uses: actions/upload-artifact@v4
         with:
