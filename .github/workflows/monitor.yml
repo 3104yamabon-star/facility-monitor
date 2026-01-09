@@ -2,8 +2,6 @@
 name: Facility Availability Monitor
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # 5分おき
   workflow_dispatch:
 
 permissions:
