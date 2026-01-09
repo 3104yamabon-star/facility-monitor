@@ -9,11 +9,10 @@
 - Playwrightの既定タイムアウトを5秒に短縮（page.set_default_timeout(5000)）
 - それ以外の機能（カレンダー枠の限定、日付セルのみ、次月への絶対日付遷移、差分時のみ履歴保存、詳細タイマー）は現状維持
 
-★ 今回のご要望対応:
-- 空き状況を表示した段階（月の遷移も含む）で約1.5秒の猶予を追加
-  * 環境変数 GRACE_MS（既定 1500ms）で調整可能
-  * navigate_to_facility() のクリックシーケンス完了直後に待機
-  * click_next_month() でDOM更新待ちが済んだ直後に待機
+★ 今回のご要望対応（最小限の高速化）:
+- 「next-month: wait outerHTML change」を完全削除（20秒の固定待ちを廃止）
+- 月送りの成功判定は「月テキスト変化」だけで判断
+- 画面安定化のための猶予（GRACE_MS=1500ms 既定）は維持
 """
 import os
 import sys
@@ -39,7 +38,7 @@ MONITOR_START_HOUR = int(os.getenv("MONITOR_START_HOUR", "5"))
 MONITOR_END_HOUR = int(os.getenv("MONITOR_END_HOUR", "23"))
 TIMING_VERBOSE = os.getenv("TIMING_VERBOSE", "0").strip() == "1"
 
-# ★ 追加: 画面安定化のための猶予（ミリ秒）
+# ★ 安定化猶予（ミリ秒）: 既定 1500ms（環境変数で変更可）
 GRACE_MS = int(os.getenv("GRACE_MS", "1500"))
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -103,7 +102,7 @@ def safe_element_screenshot(el, out: Path):
     out.parent.mkdir(parents=True, exist_ok=True)
     el.scroll_into_view_if_needed(); el.screenshot(path=str(out))
 
-# ====== 画面安定化用ヘルパー（★追加） ======
+# ====== 画面安定化用ヘルパー ======
 def grace_pause(page, label: str = "grace wait"):
     """画面の安定化待ち（既定 1.5s）。GRACE_MS で調整可能。"""
     try:
@@ -141,7 +140,7 @@ def try_click_text(page, label: str, timeout_ms: int = 15000, quiet=True) -> boo
             continue
     return False
 
-# --- ★ 任意ダイアログの超軽量処理 ---
+# --- 任意ダイアログの超軽量処理 ---
 OPTIONAL_DIALOG_LABELS = ["同意する", "OK", "確認", "閉じる"]
 
 def click_optional_dialogs_fast(page) -> None:
@@ -153,7 +152,6 @@ def click_optional_dialogs_fast(page) -> None:
     for label in OPTIONAL_DIALOG_LABELS:
         with time_section(f"optional-dialog: '{label}'"):
             clicked = False
-            # まず role=link / role=button / exact text を素早く count()
             probes = [
                 page.get_by_role("link", name=label, exact=True),
                 page.get_by_role("button", name=label, exact=True),
@@ -164,28 +162,24 @@ def click_optional_dialogs_fast(page) -> None:
                 try:
                     c = probe.count()
                     if c > 0:
-                        # クリックは短い timeout で
                         try:
                             probe.first.scroll_into_view_if_needed()
-                            probe.first.click(timeout=500)  # ★ 500ms
+                            probe.first.click(timeout=500)  # 500ms
                             clicked = True
                             break
                         except Exception:
-                            # 可視化されていない等…次のプローブを試す
                             pass
                 except Exception:
                     pass
-            # それでも未クリックなら、部分一致をさらに素早く試す（300ms）
             if not clicked:
                 try:
                     cand = page.locator(f"a:has-text('{label}')").first
                     if cand.count() > 0:
                         cand.scroll_into_view_if_needed()
-                        cand.click(timeout=300)  # ★ 300ms
+                        cand.click(timeout=300)  # 300ms
                         clicked = True
                 except Exception:
                     pass
-            # クリックできてもできなくても「短時間で」抜けるのが目的
 
 def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
     if not BASE_URL:
@@ -193,20 +187,16 @@ def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
     with time_section("goto BASE_URL"):
         page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_load_state("domcontentloaded", timeout=30000)
-    # 既定タイムアウトを短縮（局所で延ばす方針）
-    page.set_default_timeout(5000)  # ★ 30s → 5s
-
-    # ★ 任意ダイアログを超軽量で処理（合計でも≤数秒で抜ける想定）
+    page.set_default_timeout(5000)  # 30s → 5s
     click_optional_dialogs_fast(page)
 
-    # 以降は click_sequence を順に（各セクションは計測ログを出す）
     for label in facility.get("click_sequence", []):
         with time_section(f"click_sequence: '{label}'"):
             ok = try_click_text(page, label, timeout_ms=5000)
             if not ok:
                 raise RuntimeError(f"クリック対象が見つかりません：『{label}』（施設: {facility.get('name','')}）")
 
-    # ★ 追加: 空き状況画面を開いた直後の安定化猶予
+    # 空き状況画面を開いた直後の安定化猶予
     grace_pause(page, label="after availability view shown")
 
 def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
@@ -312,6 +302,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
         else:
             el.scroll_into_view_if_needed(); el.click(timeout=2000)
 
+    # 1) ボタンを探してクリック
     with time_section("next-month: find & click"):
         clicked = False
         sel_cfg = (facility or {}).get("next_month_selector")
@@ -335,7 +326,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
                 if m: cur01 = f"{int(m.group(1)):04d}{int(m.group(2)):02d}01"
                 for e in els:
                     href = e.get_attribute("href") or ""
-                    m2 = re.search(r"moveCalender\([^\,]+,[^\,]+,\s*(\d{8})\)", href)
+                    m2 = re.search(r"moveCalender\([^,]+,[^,]+,\s*(\d{8})\)", href)
                     if not m2: continue
                     ymd = m2.group(1)
                     if target and ymd == target: chosen, chosen_date = e, ymd; break
@@ -347,35 +338,19 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
 
         if not clicked: return False
 
-    with time_section("next-month: wait outerHTML change"):
-        old_html = None
-        if calendar_root is not None:
-            try: old_html = calendar_root.evaluate("el => el.outerHTML")
-            except Exception: old_html = None
-        try:
-            if old_html:
-                page.wait_for_function(
-                    """(old)=>{const r=document.querySelector('table.reservation-calendar')
-
-document.querySelector('[role="grid"]')
-
-document.querySelector('table');return r && r.outerHTML!==old;}""",
-                    arg=old_html, timeout=wait_timeout_ms
-                )
-        except Exception: pass
-
+    # 2) ★ outerHTML の変化待ちは削除（高速化）
+    #    月送りの成功判定は「月テキストが +1 の月に変わること」だけを待つ
     with time_section("next-month: wait month text change (+1)"):
         goal = _compute_next_month_text(prev_month_text or "")
         try:
             if goal:
                 page.wait_for_function(
-                    """(g)=>{const t=document.body.innerText
-
-'';return t.includes(g);}""",
+                    """(g)=>{ return document.body.innerText.includes(g); }""",
                     arg=goal, timeout=wait_timeout_ms
                 )
         except Exception: pass
 
+    # 3) 遷移方向の確認
     with time_section("next-month: confirm direction"):
         cur = None
         try: cur = get_current_year_month_text(page, calendar_root=None)
@@ -384,7 +359,7 @@ document.querySelector('table');return r && r.outerHTML!==old;}""",
             print(f"[WARN] next-month moved backward: {prev_month_text} -> {cur}", flush=True)
             return False
 
-    # ★ 追加: 月遷移直後の安定化猶予
+    # 4) 軽い安定化待ち（既存の grace_pause）
     grace_pause(page, label="after month transition")
 
     return True
