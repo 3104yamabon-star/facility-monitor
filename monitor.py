@@ -1,14 +1,15 @@
 
 # -*- coding: utf-8 -*-
 """
-さいたま市 施設予約システムの空き状況監視（「館一覧→施設詳細→戻る」最適化版：タイマー＋専用戻るクリック）
+さいたま市 施設予約システムの空き状況監視
+（館一覧→施設詳細→戻る 最適化：タイマー＋戻るクリック強化＋復帰確認レース）
 
 - 共通導線（施設の空き状況 → 利用目的から → 屋内スポーツ → バドミントン）は最初の1回のみ。
-- 以降は「館一覧（施設選択画面）」から施設詳細へ入り、処理後は画面右上の「戻る」（サイト内）で一覧へ復帰。
-- 「戻る」は専用関数 click_back_to_list() で素早く・確実にクリック（フレーム横断＋テキスト／onclick 属性対応）。
-- 鈴谷公民館のみ、施設詳細へ入った直後に「すべて」を押す（忘れない）。
-- 監視する月数は config.json の month_shifts に従う（例：岸町・鈴谷=0,1 / 南浦和・岩槻南部=0,1,2,3）。
-- 計測は time_section()（タイマー）で区間時間をログに出力。
+- 以降は「館一覧（施設選択）」→ 施設詳細 → 右上『戻る』（サイト内） → 館一覧 を繰り返す。
+- 『戻る』は click_back_to_list() でフレーム横断・テキスト/onclick属性に対応。
+- 『戻る』クリック後に wait_back_to_list_confirm() で「館一覧へ復帰したこと」をDOMの特徴で確認（最大 ~1.8s）。
+- 鈴谷公民館のみ、詳細遷移直後に『すべて』を押す。
+- 監視月数は config.json の month_shifts に従う（例：岸町・鈴谷=0,1 / 南浦和・岩槻南部=0,1,2,3）。
 """
 
 import os
@@ -38,9 +39,8 @@ MONITOR_FORCE = os.getenv("MONITOR_FORCE", "0").strip() == "1"
 MONITOR_START_HOUR = int(os.getenv("MONITOR_START_HOUR", "5"))
 MONITOR_END_HOUR = int(os.getenv("MONITOR_END_HOUR", "23"))
 TIMING_VERBOSE = os.getenv("TIMING_VERBOSE", "0").strip() == "1"
-FAST_ROUTES = os.getenv("FAST_ROUTES", "0").strip() == "1"  # フォント/解析ブロックON/OFF
+FAST_ROUTES = os.getenv("FAST_ROUTES", "0").strip() == "1"
 
-# 保険用の上限（ミリ秒）
 GRACE_MS_DEFAULT = 1000
 try:
     GRACE_MS = max(0, int(os.getenv("GRACE_MS", str(GRACE_MS_DEFAULT))))
@@ -53,7 +53,6 @@ BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.getenv("OUTPUT_DIR", str(BASE_DIR / "snapshots"))).resolve()
 CONFIG_PATH = BASE_DIR / "config.json"
 
-# 施設の短縮名（Discord色分けにも使用）
 FACILITY_TITLE_ALIAS = {
     "岩槻南部公民館": "岩槻",
     "南浦和コミュニティセンター": "南浦和",
@@ -112,9 +111,8 @@ def safe_element_screenshot(el, out: Path):
     out.parent.mkdir(parents=True, exist_ok=True)
     el.scroll_into_view_if_needed(); el.screenshot(path=str(out))
 
-# ====== 不要リソースブロック（任意：フォント/解析） ======
+# ====== 不要リソースブロック（任意） ======
 def enable_fast_routes(page):
-    """フォント/解析のダウンロードを抑制（UIに必須でない範囲）"""
     block_exts = (".woff", ".woff2", ".ttf")
     block_hosts = ("www.google-analytics.com", "googletagmanager.com")
     def handler(route):
@@ -124,31 +122,8 @@ def enable_fast_routes(page):
         return route.continue_()
     page.route("**/*", handler)
 
-# ====== グレース待機（保険。入口・月遷移では非使用） ======
-def grace_pause(page, label: str = "grace wait"):
-    ms_cap = GRACE_MS if isinstance(GRACE_MS, int) else GRACE_MS_DEFAULT
-    if ms_cap <= 0:
-        return
-    with time_section(f"{label} (adaptive, <= {ms_cap}ms)"):
-        step = 200
-        spent = 0
-        page.wait_for_timeout(step); spent += step
-        try:
-            while spent < ms_cap:
-                cells = page.locator("[role='gridcell'], table.reservation-calendar tbody td, .fc-daygrid-day, .calendar-day")
-                if cells.count() >= 28:
-                    break
-                remaining = ms_cap - spent
-                wait_ms = step if remaining >= step else remaining
-                if wait_ms <= 0:
-                    break
-                page.wait_for_timeout(wait_ms); spent += wait_ms
-        except Exception:
-            pass
-
 # ====== Playwright 基本操作 ======
 def try_click_text(page, label: str, timeout_ms: int = 5000, quiet=True) -> bool:
-    # 汎用（他の場所でも使うため既定は従来タイムアウト）
     probes = [
         page.get_by_role("link", name=label, exact=True),
         page.get_by_role("button", name=label, exact=True),
@@ -207,7 +182,6 @@ def click_optional_dialogs_fast(page) -> None:
                 except Exception:
                     pass
 
-# === 次画面の特征DOMヒント（入口の軽量ウェイト用） ===
 HINTS: Dict[str, str] = {
     "施設の空き状況": ".availability-grid, #availability, .facility-list",
     "利用目的から": ".category-cards, .purpose-list",
@@ -215,7 +189,6 @@ HINTS: Dict[str, str] = {
     "バドミントン": ".facility-list, .results-grid",
 }
 
-# === クリック後の「次ステップ準備」レース（URL変化 or DOMヒント） ===
 def wait_next_step_ready(page, css_hint: Optional[str] = None) -> None:
     deadline = time.perf_counter() + 0.9
     last_url = page.url
@@ -229,7 +202,6 @@ def wait_next_step_ready(page, css_hint: Optional[str] = None) -> None:
             pass
         page.wait_for_timeout(120)
 
-# === 館一覧で「次施設リンク可視」限定待機 ===
 def wait_list_ready_for(page, next_facility_name: Optional[str], timeout_ms: int = 1500):
     if not next_facility_name:
         return
@@ -239,66 +211,142 @@ def wait_list_ready_for(page, next_facility_name: Optional[str], timeout_ms: int
         except Exception:
             wait_next_step_ready(page, css_hint=None)
 
-# === 「戻る」専用：フレーム横断＋多段セレクタ＋onclickマッチ（推奨解決策） ===
+# ====== 「戻る」専用クリック（フレーム横断＋テキスト/onclick対応） ======
 def click_back_to_list(page, timeout_ms: int = 1500) -> bool:
-    """
-    施設詳細（カレンダー）画面右上の『戻る』を最優先でクリックする。
-    - すべてのフレームを横断して探索
-    - a / button / input[type=button|submit] / area なども対象
-    - onclick に予約システムの戻りアクションが含まれる場合は属性でクリック
-    - テキストは『戻る』と『もどる』を両方試す（正確一致と部分一致）
-    """
     try:
         frames = [page] + list(page.frames)
-
-        selector_sets = [
-            ["a:has-text('戻る')", "button:has-text('戻る')", "a:has-text('もどる')", "button:has-text('もどる')"],
-            ["a:has-text('戻')", "button:has-text('戻')"],  # 緩和
-            ["a[onclick*='gRsvWTransInstSrchPpsPageMoveAction']",
-             "a[onclick*='InstSrchPpsPageMoveAction']",
-             "[onclick*='gRsvWTransInstSrchPpsPageMoveAction']"],
-            ["input[type='button'][value='戻る']",
-             "input[type='submit'][value='戻る']",
-             "input[onclick*='gRsvWTransInstSrchPpsPageMoveAction']"],
-            ["area[alt='戻る']", "area[title='戻る']"],
+        regex_labels = [r"\s*戻る\s*", r"\s*もどる\s*"]
+        onclick_keywords = [
+            "gRsvWTransInstSrchPpsPageMoveAction",
+            "InstSrchPpsPageMoveAction",
+            "BuildAction",
         ]
-
         for fr in frames:
-            # 1) セレクタベース
-            for sels in selector_sets:
-                for sel in sels:
-                    try:
-                        el = fr.locator(sel).first
-                        if el.count() > 0:
-                            el.scroll_into_view_if_needed()
-                            el.click(timeout=timeout_ms)
-                            return True
-                    except Exception:
-                        continue
-            # 2) テキストノードのみ（span/div等）
-            for label in ("戻る", "もどる"):
+            # 正規表現テキスト
+            for pat in regex_labels:
                 try:
-                    el = fr.get_by_text(label, exact=True).first
+                    el = fr.locator(f"text=/{pat}/").first
                     if el.count() > 0:
                         el.scroll_into_view_if_needed()
                         el.click(timeout=timeout_ms)
                         return True
                 except Exception:
-                    continue
-            # 3) onclick 属性を直接発火（最終手段）
+                    pass
+            # has-text
+            for sel in [
+                "a:has-text('戻る')", "button:has-text('戻る')",
+                "a:has-text('もどる')", "button:has-text('もどる')",
+                "a:has-text('戻')",    "button:has-text('戻')",
+            ]:
+                try:
+                    el = fr.locator(sel).first
+                    if el.count() > 0:
+                        el.scroll_into_view_if_needed()
+                        el.click(timeout=timeout_ms)
+                        return True
+                except Exception:
+                    pass
+            # XPath normalize-space
+            for xp in [
+                "//a[contains(normalize-space(.),'戻る')]",
+                "//a[contains(normalize-space(.),'もどる')]",
+                "//button[contains(normalize-space(.),'戻る')]",
+                "//button[contains(normalize-space(.),'もどる')]",
+            ]:
+                try:
+                    el = fr.locator(f"xpath={xp}").first
+                    if el.count() > 0:
+                        el.scroll_into_view_if_needed()
+                        el.click(timeout=timeout_ms)
+                        return True
+                except Exception:
+                    pass
+            # onclick属性
+            for kw in onclick_keywords:
+                try:
+                    el = fr.locator(f"[onclick*='{kw}']").first
+                    if el.count() > 0:
+                        el.scroll_into_view_if_needed()
+                        el.click(timeout=timeout_ms)
+                        return True
+                except Exception:
+                    pass
+            # input/area 属性
+            for sel in [
+                "input[type='button'][value='戻る']",
+                "input[type='submit'][value='戻る']",
+                "area[alt='戻る']",
+                "area[title='戻る']",
+            ]:
+                try:
+                    el = fr.locator(sel).first
+                    if el.count() > 0:
+                        el.scroll_into_view_if_needed()
+                        el.click(timeout=timeout_ms)
+                        return True
+                except Exception:
+                    pass
+            # span/div のテキスト正規表現
+            for pat in regex_labels:
+                try:
+                    el = fr.locator(f"span:text-matches('{pat}')").first
+                    if el.count() == 0:
+                        el = fr.locator(f"div:text-matches('{pat}')").first
+                    if el.count() > 0:
+                        el.scroll_into_view_if_needed()
+                        el.click(timeout=timeout_ms)
+                        return True
+                except Exception:
+                    pass
+            # onclick を直接発火（最終手段）
             try:
-                handles = fr.locator("[onclick*='InstSrchPpsPageMoveAction']").element_handles()
+                handles = fr.locator("[onclick]").element_handles()
                 for h in handles:
-                    fr.evaluate_handle("el => el.scrollIntoView({block:'center'})", h)
-                    fr.evaluate_handle("el => el.click()", h)
-                    return True
+                    try:
+                        onclick = fr.evaluate_handle("el => el.getAttribute('onclick')", h).json_value()
+                    except Exception:
+                        onclick = ""
+                    if not onclick:
+                        continue
+                    if any(kw in onclick for kw in onclick_keywords):
+                        fr.evaluate_handle("el => el.scrollIntoView({block:'center'})", h)
+                        fr.evaluate_handle("el => el.click()", h)
+                        return True
             except Exception:
                 pass
     except Exception:
         pass
     return False
 
-# === カレンダー準備（セル数 or visible保険） ===
+# ====== ★館一覧復帰確認（クリック後のDOM変化を待つ） ======
+def wait_back_to_list_confirm(page, timeout_ms: int = 1800, candidates: Optional[List[str]] = None) -> bool:
+    """
+    館一覧（施設選択）へ戻れたことを、DOMの特徴で確認する。
+    - パンくずの『現在位置 館』
+    - 『館一覧』見出しテキスト
+    - 代表的な館名リンク（テキスト）や sendBldCd の属性存在
+    いずれか成立で True。上限 timeout_ms。
+    """
+    deadline = time.perf_counter() + (timeout_ms / 1000.0)
+    candidates = candidates or ["鈴谷公民館","岸町公民館","岩槻南部公民館","南浦和コミュニティセンター","館一覧"]
+    while time.perf_counter() < deadline:
+        try:
+            if page.get_by_text("現在位置 館", exact=False).count() > 0:
+                return True
+            if page.get_by_text("館一覧", exact=False).count() > 0:
+                return True
+            for nm in candidates:
+                if nm and page.get_by_text(nm, exact=True).count() > 0:
+                    return True
+            # onclick/href に sendBldCd を含む館リンク
+            if page.locator("[href*='sendBldCd'], [onclick*='sendBldCd']").count() > 0:
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(120)
+    return False
+
+# ====== カレンダー準備 ======
 def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
     with time_section("wait calendar root ready"):
         deadline = time.perf_counter() + 1.5
@@ -689,7 +737,6 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
         return summary, details
 
 def facility_month_dir(short: str, month_text: str) -> Path:
-    # ✅ 正しいサニタイズ（HTMLエンティティ不要）
     safe_fac = re.sub(r'[\\/:*?"<>|]+', "_", short)
     safe_month = re.sub(r'[\\/:*?"<>|]+', "_", month_text or "unknown_month")
     d = OUTPUT_ROOT / safe_fac / safe_month
@@ -740,35 +787,24 @@ IMPROVE_TRANSITIONS = {
     ("未判定", "△"),
     ("未判定", "○")
 }
-
 def _parse_month_text(month_text: str) -> Optional[Tuple[int, int]]:
     m = re.match(r"(\d{4})年(\d{1,2})月", month_text or "")
     if not m: return None
     return int(m.group(1)), int(m.group(2))
-
 def _day_str_to_int(day_str: str) -> Optional[int]:
     m = re.search(r"([1-9]|1\d|2\d|3[01])\s*日", day_str or "")
     return int(m.group(1)) if m else None
-
 def _weekday_jp(dt: datetime.date) -> str:
     names = ["月","火","水","木","金","土","日"]
     return names[dt.weekday()]
-
 def _is_japanese_holiday(dt: datetime.date) -> bool:
     if not INCLUDE_HOLIDAY_FLAG: return False
     if jpholiday is None: return False
     try: return jpholiday.is_holiday(dt)
     except Exception: return False
-
-_STATUS_EMOJI = {
-    "×": "✖️",
-    "△": "🔼",
-    "○": "⭕️",
-    "未判定": "❓",
-}
+_STATUS_EMOJI = {"×":"✖️","△":"🔼","○":"⭕️","未判定":"❓"}
 def _decorate_status(st: str) -> str:
-    st = st or "未判定"
-    return _STATUS_EMOJI.get(st, "❓")
+    st = st or "未判定"; return _STATUS_EMOJI.get(st, "❓")
 
 def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cur_details: List[Dict[str,str]]) -> List[str]:
     ym = _parse_month_text(month_text)
@@ -810,8 +846,6 @@ def navigate_to_common_list(page, config: Dict[str, Any]) -> None:
     page.add_style_tag(content="*{animation-duration:0s !important; transition-duration:0s !important;}")
     page.set_default_timeout(5000)
     click_optional_dialogs_fast(page)
-
-    # 「施設の空き状況 → 利用目的から → 屋内スポーツ → バドミントン」
     common_labels = ["施設の空き状況", "利用目的から", "屋内スポーツ", "バドミントン"]
     for i, label in enumerate(common_labels):
         with time_section(f"click_sequence(common): '{label}'"):
@@ -822,8 +856,6 @@ def navigate_to_common_list(page, config: Dict[str, Any]) -> None:
             hint = HINTS.get(label)
             with time_section("wait next step ready (race)"):
                 wait_next_step_ready(page, css_hint=hint)
-
-    # 館一覧の可視化（代表施設名の存在チェック）
     facility_names = [f.get("name","") for f in config.get("facilities", []) if f.get("name")]
     with time_section("wait facility list visible"):
         deadline = time.perf_counter() + 2.0
@@ -846,36 +878,24 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
     fac_name = facility_cfg.get("name", "").strip()
     if not fac_name:
         raise RuntimeError("facility.name が未設定です。")
-
     print(f"[INFO] process facility (from list): {fac_name}", flush=True)
-
-    # 館一覧で施設名クリック（タイマー）
     with time_section(f"facility click '{fac_name}'"):
         ok = try_click_text(page, fac_name, timeout_ms=5000)
         if not ok:
             raise RuntimeError(f"館リンクが一覧で見つかりません: {fac_name}")
-
-    # 施設詳細の初期ロード（短め待機）
     with time_section(f"domcontentloaded '{fac_name}'"):
         page.wait_for_load_state("domcontentloaded", timeout=600)
-
-    # カレンダー準備（既存タイマー内）
     wait_calendar_ready(page, facility_cfg)
-
-    # 鈴谷のみ「すべて」押下（詳細画面）
     seq = facility_cfg.get("click_sequence", [])
     if fac_name == "鈴谷公民館" or ("すべて" in seq):
         with time_section("suzutani: click 'すべて'"):
             try_click_text(page, "すべて", timeout_ms=3000)
-            page.wait_for_timeout(250)  # 簡易適用待ち
-
-    # 当月処理
+            page.wait_for_timeout(250)
     month_text = get_current_year_month_text(page) or "unknown"
     cal_root = locate_calendar_root(page, month_text or "予約カレンダー", facility_cfg)
     short = FACILITY_TITLE_ALIAS.get(fac_name, fac_name) or fac_name
     outdir = facility_month_dir(short or "unknown_facility", month_text)
     print(f"[INFO] outdir={outdir}", flush=True)
-
     summary, details = summarize_vacancies(page, cal_root, config)
     prev_payload = load_last_payload(outdir)
     prev_summary = (prev_payload or {}).get("summary")
@@ -895,8 +915,6 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
     lines = build_aggregate_lines(month_text, prev_details, details)
     if lines:
         send_aggregate_lines(DISCORD_WEBHOOK_URL, short, month_text, lines)
-
-    # 月送り
     shifts = facility_cfg.get("month_shifts", [0,1])
     shifts = sorted(set(int(s) for s in shifts if isinstance(s,(int,float))))
     if 0 not in shifts: shifts.insert(0,0)
@@ -910,15 +928,12 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
                 page.screenshot(path=str(dbg / f"failed_next_month_step{step}_{short}.png"))
             print(f"[WARN] next-month click failed at step={step}", flush=True)
             break
-
         with time_section(f"get_current_month_text(step={step})"):
             month_text2 = get_current_year_month_text(page) or f"shift_{step}"
             print(f"[INFO] month(step={step}): {month_text2}", flush=True)
-
         cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー", facility_cfg)
         outdir2 = facility_month_dir(short or "unknown_facility", month_text2)
         print(f"[INFO] outdir(step={step})={outdir2}", flush=True)
-
         if step in shifts:
             summary2, details2 = summarize_vacancies(page, cal_root2, config)
             prev_payload2 = load_last_payload(outdir2)
@@ -939,26 +954,33 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
             lines2 = build_aggregate_lines(month_text2, prev_details2, details2)
             if lines2:
                 send_aggregate_lines(DISCORD_WEBHOOK_URL, short, month_text2, lines2)
-
-        # 次回ループ用
         cal_root = cal_root2
         prev_month_text = month_text2
 
-    # ---- 施設処理の最後：画面右上の「戻る」で館一覧へ戻る（推奨解決策を使用） ----
+    # ---- 『戻る』クリック → ★館一覧復帰確認レース（新設） ----
     with time_section("back-to-list click"):
-        back_ok = click_back_to_list(page, timeout_ms=1500)
+        clicked = click_back_to_list(page, timeout_ms=1500)
 
-    if not back_ok:
-        print("[WARN] 『戻る/もどる』のクリックに失敗。共通導線から再入します。", flush=True)
+    if not clicked:
+        print("[WARN] 『戻る/もどる』のクリック候補が見つからず。共通導線から再入します。", flush=True)
         navigate_to_common_list(page, config)
     else:
-        # 館一覧で「次施設リンク可視」限定待機（次施設名が分かる場合のみ）
-        if next_facility_name:
-            wait_list_ready_for(page, next_facility_name, timeout_ms=1200)
+        with time_section("back-to-list confirm"):
+            ok_back = wait_back_to_list_confirm(
+                page,
+                timeout_ms=1800,
+                candidates=[next_facility_name] if next_facility_name else None
+            )
+        if not ok_back:
+            print("[WARN] 『戻る』押下後の復帰確認に失敗。フォールバックで共通導線を再入。", flush=True)
+            navigate_to_common_list(page, config)
         else:
-            wait_next_step_ready(page, css_hint=None)
+            if next_facility_name:
+                wait_list_ready_for(page, next_facility_name, timeout_ms=1200)
+            else:
+                wait_next_step_ready(page, css_hint=None)
 
-# ====== メイン：共通導線1回 → 館一覧から各施設を処理（次施設名も渡す） ======
+# ====== メイン ======
 def run_monitor_flow():
     print("[INFO] run_monitor_flow: start", flush=True)
     print(f"[INFO] BASE_DIR={BASE_DIR} cwd={Path.cwd()} OUTPUT_ROOT={OUTPUT_ROOT}", flush=True)
@@ -979,16 +1001,12 @@ def run_monitor_flow():
 
         navigate_to_common_list(page, config)
 
-        # 館一覧から各施設へ入り、処理後は「戻る」で一覧へ戻る
         for idx, facility in enumerate(facilities):
             next_fac_name = None
             if idx + 1 < len(facilities):
                 next_fac_name = facilities[idx + 1].get("name", None)
-
-            # 次施設に入る前の限定待機（安全確認）
             nm = facility.get("name","")
             wait_list_ready_for(page, next_facility_name=nm, timeout_ms=1200)
-
             try:
                 process_one_facility_cycle(page, facility, config, next_facility_name=next_fac_name)
             except Exception as e:
@@ -998,7 +1016,6 @@ def run_monitor_flow():
                     try: page.screenshot(path=str(shot))
                     except Exception: pass
                 print(f"[ERROR] run_monitor_flow: 施設処理中に例外: {e} (debug: {shot})", flush=True)
-                # フォールバック：館一覧へ戻す
                 try:
                     navigate_to_common_list(page, config)
                 except Exception:
@@ -1037,7 +1054,7 @@ def main():
     run_monitor_flow()
 
 if __name__ == "__main__":
-    print("[INFO] Starting monitor_flow_back_timer_fix.py ...", flush=True)
+    print("[INFO] Starting monitor_flow_back_timer_confirm.py ...", flush=True)
     print(f"[INFO] BASE_DIR={BASE_DIR} cwd={Path.cwd()} OUTPUT_ROOT={OUTPUT_ROOT}", flush=True)
     main()
-    print("[INFO] monitor_flow_back_timer_fix.py finished.", flush=True)
+    print("[INFO] monitor_flow_back_timer_confirm.py finished.", flush=True)
