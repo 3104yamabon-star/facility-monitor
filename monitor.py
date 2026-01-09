@@ -25,6 +25,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from playwright.sync_api import sync_playwright
 
 
+
 # --- 通知ユーティリティ（最小版） ---
 def send_text(webhook_url: str, content: str) -> None:
     """
@@ -56,6 +57,11 @@ def send_aggregate_lines(webhook_url: str, short: str, month_text: str, lines: l
     改善検知の集合を整形してまとめて投稿。
     """
     if not lines:
+        return
+    header = f"【{short} - {month_text}】改善検知"
+    body = "\n".join(lines)
+    send_text(webhook_url, f"{header}\n{body}")
+
 
 
 # ====== 環境 ======
