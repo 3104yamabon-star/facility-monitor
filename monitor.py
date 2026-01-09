@@ -195,7 +195,9 @@ def click_optional_dialogs_fast(page) -> None:
                     pass
 
 # === 追加: 次ラベルの「見えるまで待つ」ヘルパー ===
-def wait_next_label_visible(page, next_label: str, timeout_ms: int = 5000) -> bool:
+def wait_next_label_visible(page, next_label: str, timeout_ms: int = 5000) -> bool:   
+ # 旧: timeout_ms=5000 → 新: 500
+    timeout_ms = 500
     candidates = [
         page.get_by_role("link", name=next_label, exact=True),
         page.get_by_role("button", name=next_label, exact=True),
