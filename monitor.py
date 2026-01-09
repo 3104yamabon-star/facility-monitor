@@ -1,10 +1,12 @@
 
 # -*- coding: utf-8 -*-
 """
-さいたま市 施設予約システムの空き状況監視（高速化版）
+さいたま市 施設予約システムの空き状況監視（高速化＋安定化版）
 - 入口クリック列と月遷移後の grace_wait を撤去し、次画面の具体条件待ちに置換
 - ページ読込直後に CSS アニメーション/トランジションを無効化
-- GRACE_MS は保険用に残しつつ、monitor.yml 側で 600ms を指定
+- 施設名クリック（最終ラベル）後は「次ラベルが無い」ため、必ずカレンダー枠の出現を明示的に待機
+- get_current_year_month_text() はカレンダー枠優先で取得（保険として body 走査を残置）
+- GRACE_MS は保険用に残しつつ、workflow 側で 600ms を設定推奨
 """
 import os
 import sys
@@ -107,7 +109,7 @@ def safe_element_screenshot(el, out: Path):
 # ======（保険用）汎用グレース待機 ======
 def grace_pause(page, label: str = "grace wait"):
     """
-    ※ 今回の修正版では、入口クリック列・月遷移後では使用しません（保険として残置）。
+    ※ 今版では、入口・月遷移後では使いません（保険として残置）。
     初期 200ms + セル数>=28 を検知したら抜ける。上限は GRACE_MS。
     """
     ms_cap = GRACE_MS if isinstance(GRACE_MS, int) else GRACE_MS_DEFAULT
@@ -208,7 +210,7 @@ def wait_next_label_visible(page, next_label: str, timeout_ms: int = 5000) -> bo
             continue
     return False
 
-# === 追加: 入口クリック列を「具体条件待ち」に置き換え ===
+# === 入口クリック列を「具体条件待ち」に置き換え ===
 def click_sequence_fast(page, labels: List[str]) -> None:
     for i, label in enumerate(labels):
         with time_section(f"click_sequence: '{label}'"):
@@ -232,25 +234,48 @@ def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
         # 入口クリック列（具体条件待ちに変更）
         click_sequence_fast(page, facility.get("click_sequence", []))
 
+    # ★追加：最後のクリック後は「次ラベル」が無いので、カレンダー枠の出現を明示的に待つ
+    with time_section("wait calendar root visible"):
+        sel_cfg = facility.get("calendar_selector") or "table.reservation-calendar"
+        try:
+            page.locator(sel_cfg).first.wait_for(state="visible", timeout=8000)
+        except Exception:
+            # ヒューリスティック候補で保険待機
+            for alt in ["[role='grid']", "table.reservation-calendar", "table"]:
+                try:
+                    page.locator(alt).first.wait_for(state="visible", timeout=4000)
+                    break
+                except Exception:
+                    continue
+
 def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
     pat = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
     targets: List[str] = []
-    try:
-        if calendar_root is None:
-            # 施設の既定セレクタ（南浦和等で利用）
-            loc = page.locator("table.reservation-calendar").first
-            if loc and loc.count() > 0:
-                calendar_root = loc
-        if calendar_root is not None:
+    # 1) まず facility のセレクタ／既定セレクタから取得（カレンダー優先）
+    if calendar_root is None:
+        locs = [
+            page.locator("table.reservation-calendar").first,
+            page.locator("[role='grid']").first,
+        ]
+        for loc in locs:
+            try:
+                if loc and loc.count() > 0:
+                    calendar_root = loc
+                    break
+            except Exception:
+                continue
+    if calendar_root is not None:
+        try:
             targets.append(calendar_root.inner_text())
-    except Exception:
-        pass
-    # 最後の保険として body を参照（通常は calendar_root で取れる）
+        except Exception:
+            pass
+    # 2) 保険として body 走査（本来は使われない想定）
     if not targets:
         try:
             targets.append(page.inner_text("body"))
         except Exception:
             pass
+
     for txt in targets:
         if not txt:
             continue
@@ -697,7 +722,7 @@ def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cu
             lines.append(line)
     return lines
 
-# ====== Discord 通知クライアント（省略せず原文維持） ======
+# ====== Discord 通知クライアント ======
 DISCORD_CONTENT_LIMIT = 2000
 DISCORD_EMBED_DESC_LIMIT = 4096
 
