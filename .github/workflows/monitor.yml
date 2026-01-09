@@ -13,12 +13,13 @@ jobs:
     concurrency:
       group: facility-monitor
       cancel-in-progress: false
+
     env:
       PYTHONUNBUFFERED: "1"
       OUTPUT_DIR: snapshots
       PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      # ★ ここを 600ms に短縮（保険用の上限）
+      # 保険用の上限（軽量待機の上限ミリ秒）
       GRACE_MS: "600"
 
     steps:
@@ -47,11 +48,11 @@ jobs:
           python - <<'PY'
           import subprocess, sys
           try:
-            import playwright  # noqa
-            print("[INFO] playwright package is present.")
+              import playwright  # noqa
+              print("[INFO] playwright package is present.")
           except Exception:
-            print("[INFO] playwright not found; installing pinned version...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright==1.46.0"])
+              print("[INFO] playwright not found; installing pinned version...")
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright==1.46.0"])
           PY
 
       - name: Compute Playwright cache key
@@ -62,9 +63,9 @@ jobs:
           PW_VER=$(python - <<'PY'
           import importlib.metadata as m
           try:
-            print(m.version("playwright"))
+              print(m.version("playwright"))
           except Exception:
-            print("")
+              print("")
           PY
           )
           if [ -z "${PW_VER}" ]; then
@@ -77,14 +78,14 @@ jobs:
           echo "Playwright version: ${PW_VER}"
           echo "version=${PW_VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Playwright browsers
+      - name: Cache Playwright browsers (Chromium)
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-msplaywright-${{ steps.pw.outputs.version }}
           restore-keys: |
             ${{ runner.os }}-msplaywright-
-          save-always: true
+        # save-always: true   # GitHub Actions v4ではデフォルト挙動でOK
 
       - name: Check cached browsers
         id: have_browsers
@@ -121,17 +122,20 @@ jobs:
         run: |
           python -m json.tool config.json > /dev/null
 
-      - name: Run monitor (force)
+      # ★ 時間帯ゲートを有効化（MONITOR_FORCE=0）し、--force を削除
+      - name: Run monitor (windowed)
         env:
           OUTPUT_DIR: ${{ env.OUTPUT_DIR }}
           BASE_URL: ${{ secrets.BASE_URL }}
           DISCORD_WEBHOOK_URL: ${{ env.DISCORD_WEBHOOK_URL }}
-          MONITOR_FORCE: "1"
-          # 入口・月遷移の「具体条件待ち」へ移行済み。保険の上限のみ 600ms。
+          MONITOR_FORCE: "0"         # ★ 時間帯外では実行しない
+          MONITOR_START_HOUR: "5"    # ★ 05:00 開始
+          MONITOR_END_HOUR:   "23"   # ★ 23:55 終了（分は次行）
+          MONITOR_END_MINUTE: "55"   # ★ 終了分を指定
           GRACE_MS: ${{ env.GRACE_MS }}
         run: |
           echo "[INFO] Starting monitor.py ..."
-          python -u monitor.py --force
+          python -u monitor.py       # ★ --force は付けない
           echo "[INFO] monitor.py finished."
 
       - name: Show snapshot files (detailed)
