@@ -61,6 +61,82 @@ FACILITY_TITLE_ALIAS = {
     "鈴谷公民館": "鈴谷",
 }
 
+# ====== 差分通知（祝日表示・絵文字） ======
+IMPROVE_TRANSITIONS = {
+    ("×", "△"),
+    ("△", "○"),
+    ("×", "○"),
+    ("未判定", "△"),
+    ("未判定", "○"),
+}
+
+def _parse_month_text(month_text: str) -> Optional[Tuple[int, int]]:
+    m = re.match(r"(\d{4})年(\d{1,2})月", month_text or "")
+    if not m: return None
+    return int(m.group(1)), int(m.group(2))
+
+def _day_str_to_int(day_str: str) -> Optional[int]:
+    m = re.search(r"([1-9]|1\d|2\d|3[01])\s*日", day_str or "")
+    return int(m.group(1)) if m else None
+
+def _weekday_jp(dt: datetime.date) -> str:
+    names = ["月","火","水","木","金","土","日"]
+    return names[dt.weekday()]
+
+def _is_japanese_holiday(dt: datetime.date) -> bool:
+    # INCLUDE_HOLIDAY_FLAG と jpholiday がグローバルにある前提
+    if not INCLUDE_HOLIDAY_FLAG: return False
+    if jpholiday is None: return False
+    try: return jpholiday.is_holiday(dt)
+    except Exception: return False
+
+_STATUS_EMOJI = {
+    "×": "✖️",
+    "△": "🔼",
+    "○": "⭕️",
+    "未判定": "❓",
+}
+
+def _decorate_status(st: str) -> str:
+    st = st or "未判定"
+    return _STATUS_EMOJI.get(st, "❓")
+
+def build_aggregate_lines(month_text: str,
+                          prev_details: List[Dict[str,str]],
+                          cur_details:  List[Dict[str,str]]) -> List[str]:
+    """
+    直近実行と前回実行の詳細（day/status）差分から、改善（×→△、△→○ など）を抽出して
+    Discordに送る短文の配列を生成します。
+    """
+    ym = _parse_month_text(month_text)
+    if not ym: return []
+    y, mo = ym
+    prev_map: Dict[int, str] = {}
+    cur_map:  Dict[int, str] = {}
+    for d in (prev_details or []):
+        di = _day_str_to_int(d.get("day",""))
+        if di is not None:
+            prev_map[di] = d.get("status","未判定")
+    for d in (cur_details or []):
+        di = _day_str_to_int(d.get("day",""))
+        if di is not None:
+            cur_map[di] = d.get("status","未判定")
+
+    lines: List[str] = []
+    for di, cur_st in sorted(cur_map.items()):
+        prev_st = prev_map.get(di)
+        if prev_st is None:
+            continue
+        if (prev_st, cur_st) in IMPROVE_TRANSITIONS:
+            dt = datetime.date(y, mo, di)
+            wd = _weekday_jp(dt)
+            wd_part = f"{wd}・祝" if _is_japanese_holiday(dt) else wd
+            prev_fmt = _decorate_status(prev_st)
+            cur_fmt  = _decorate_status(cur_st)
+            line = f"{y}年{mo}月{di}日 ({wd_part}) : {prev_fmt} → {cur_fmt}"
+            lines.append(line)
+    return lines
+
 # ====== タイマー ======
 @contextmanager
 def time_section(title: str):
