@@ -1,13 +1,12 @@
 
 # -*- coding: utf-8 -*-
 """
-さいたま市 施設予約システムの空き状況監視（高速化＋安定化版）
-- 入口クリック列と月遷移後の grace_wait を撤去し、次画面の具体条件待ちに置換
-- ページ読込直後に CSS アニメーション/トランジションを無効化
-- 施設名クリック（最終ラベル）後は「次ラベルが無い」ため、必ずカレンダー枠の出現を短時間でレース待機
-- get_current_year_month_text() はカレンダー枠優先で取得（保険として body 走査を残置）
-- 入口「次ラベル待ち」を 500ms 上限に短縮、カレンダー準備は ≤2s で判定
+さいたま市 施設予約システムの空き状況監視（高速化＋安定化・再修正版）
+- 入口クリック後の待機を「イベントレース一本化（URL変化 or 特徴DOM出現 ≤0.9s）」に変更
+- カレンダー準備を「セル数>=28 ポーリング（150ms, ≤1.5s）＋ visible 保険300ms」に固定
+- 不要リソース（フォント/解析）ブロックをオプションで有効化可能（FAST_ROUTES=1）
 """
+
 import os
 import sys
 import json
@@ -32,10 +31,13 @@ except Exception:
 
 BASE_URL = os.getenv("BASE_URL")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
 MONITOR_FORCE = os.getenv("MONITOR_FORCE", "0").strip() == "1"
 MONITOR_START_HOUR = int(os.getenv("MONITOR_START_HOUR", "5"))
 MONITOR_END_HOUR = int(os.getenv("MONITOR_END_HOUR", "23"))
+
 TIMING_VERBOSE = os.getenv("TIMING_VERBOSE", "0").strip() == "1"
+FAST_ROUTES = os.getenv("FAST_ROUTES", "0").strip() == "1"  # フォント/解析ブロックON/OFF
 
 # 保険用の上限（ミリ秒）
 GRACE_MS_DEFAULT = 1000
@@ -106,12 +108,20 @@ def safe_element_screenshot(el, out: Path):
     out.parent.mkdir(parents=True, exist_ok=True)
     el.scroll_into_view_if_needed(); el.screenshot(path=str(out))
 
-# ======（保険用）汎用グレース待機 ======
+# ====== 不要リソースブロック（任意） ======
+def enable_fast_routes(page):
+    """フォント/解析のダウンロードを抑止（UIに必須でない範囲）"""
+    block_exts = (".woff", ".woff2", ".ttf")
+    block_hosts = ("www.google-analytics.com", "googletagmanager.com")
+    def handler(route):
+        url = route.request.url
+        if url.endswith(block_exts) or any(h in url for h in block_hosts):
+            return route.abort()
+        return route.continue_()
+    page.route("**/*", handler)
+
+# ======（保険用）汎用グレース待機（入口・月遷移では非使用） ======
 def grace_pause(page, label: str = "grace wait"):
-    """
-    ※ 今版では、入口・月遷移後では使いません（保険として残置）。
-    初期 200ms + セル数>=28 を検知したら抜ける。上限は GRACE_MS。
-    """
     ms_cap = GRACE_MS if isinstance(GRACE_MS, int) else GRACE_MS_DEFAULT
     if ms_cap <= 0:
         return
@@ -194,47 +204,34 @@ def click_optional_dialogs_fast(page) -> None:
                 except Exception:
                     pass
 
-# === 追加: 次ラベルの「見えるまで待つ」ヘルパー（500ms 上限） ===
-def wait_next_label_visible(page, next_label: str, timeout_ms: int = 5000) -> bool:
-    timeout_ms = 500  # 0.5s に短縮
-    candidates = [
-        page.get_by_role("link", name=next_label, exact=True),
-        page.get_by_role("button", name=next_label, exact=True),
-        page.get_by_text(next_label, exact=True),
-        page.locator(f"text={next_label}"),
-    ]
-    for cand in candidates:
-        try:
-            cand.wait_for(timeout=timeout_ms)
-            return True
-        except Exception:
-            continue
-    return False
+# === 入口ステップごとの特徴DOM（必要に応じて調整） ===
+# 次画面で「必ず現れる要素」をセレクタで指定しておくと、レースが即抜けしやすくなります。
+HINTS: Dict[str, str] = {
+    "施設の空き状況": ".availability-grid, #availability, .facility-list",
+    "利用目的から":   ".category-cards, .purpose-list",
+    "屋内スポーツ":   ".sport-list, .sport-cards",
+    "バドミントン":   ".facility-list, .results-grid",
+}
 
-# === 追加: クリック後の「次ステップ準備」レース待機（任意ヒント付き） ===
-def wait_next_step_ready(page, next_label: Optional[str] = None, css_hint: Optional[str] = None) -> None:
+# === クリック後の「次ステップ準備」レース（URL変化 or 特徴DOM） ===
+def wait_next_step_ready(page, css_hint: Optional[str] = None) -> None:
     """
-    - networkidle を短く（最大 800ms）
-    - 次ラベルの可視 or ヒントセレクタの存在 のいずれかで即抜け
-    - 上限 1.2s の軽量ポーリング（150ms 間隔）
+    - URL変化 or ヒントDOM出現のいずれか成立で即抜け
+    - 上限 0.9s（軽量ポーリング 120ms）
     """
-    try:
-        page.wait_for_load_state("networkidle", timeout=800)
-    except Exception:
-        pass
-
-    deadline = time.perf_counter() + 1.2
+    deadline = time.perf_counter() + 0.9
+    last_url = page.url
     while time.perf_counter() < deadline:
         try:
-            if next_label and page.get_by_text(next_label, exact=True).count() > 0:
+            if page.url != last_url:
                 return
             if css_hint and page.locator(css_hint).count() > 0:
                 return
         except Exception:
             pass
-        page.wait_for_timeout(150)
+        page.wait_for_timeout(120)
 
-# === 入口クリック列：次ラベル待ち（0.5s）＋任意のヒントで高速化 ===
+# === 入口クリック列：イベントレース一本化（可視待ち撤廃） ===
 def click_sequence_fast(page, labels: List[str]) -> None:
     for i, label in enumerate(labels):
         with time_section(f"click_sequence: '{label}'"):
@@ -242,46 +239,32 @@ def click_sequence_fast(page, labels: List[str]) -> None:
             if not ok:
                 raise RuntimeError(f"クリック対象が見つかりません：『{label}』")
         if i + 1 < len(labels):
-            nxt = labels[i + 1]
-            with time_section("wait next label visible"):
-                # まず 0.5s の可視待ち
-                ok = wait_next_label_visible(page, nxt, timeout_ms=500)
-            # 任意：ヒントが分かるなら CSS セレクタでさらにレース待ち（ここでは無指定）
+            hint = HINTS.get(label)  # 次画面の特徴DOMが分かる範囲で指定
             with time_section("wait next step ready (race)"):
-                wait_next_step_ready(page, next_label=nxt, css_hint=None)
+                wait_next_step_ready(page, css_hint=hint)
 
 def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
     if not BASE_URL:
         raise RuntimeError("BASE_URL が未設定です。Secrets の BASE_URL に https://saitama.rsv.ws-scs.jp/web/ を設定してください。")
     with time_section("goto BASE_URL"):
         page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        # オプション：不要リソースブロック
+        if FAST_ROUTES:
+            enable_fast_routes(page)
         # アニメーション/トランジションを無効化
         page.add_style_tag(content="*{animation-duration:0s !important; transition-duration:0s !important;}")
         page.set_default_timeout(5000)
         click_optional_dialogs_fast(page)
-        # 入口クリック列（具体条件待ちに変更）
+        # 入口クリック列（イベントレース一本化）
         click_sequence_fast(page, facility.get("click_sequence", []))
 
     # 最終クリック後は「次ラベル」が無いので、カレンダー枠の準備を短時間でレース待機
     wait_calendar_ready(page, facility)
 
-# === カレンダー準備：≤2s の短時間レース ===
+# === カレンダー準備：セル数判定（≤1.5s）＋ visible 保険（300ms） ===
 def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
-    """
-    カレンダー枠の『描画完了』を短時間で判定する：
-    - networkidle を 1.0s
-    - gridcell/td が 28 個以上になったら即抜け（200ms ポーリング、最大 1.6s）
-    - 最後の保険で visible 500ms 一発だけ
-    """
     with time_section("wait calendar root ready"):
-        # 1) networkidle（I/Oの静穏化）を短めで
-        try:
-            page.wait_for_load_state("networkidle", timeout=1000)
-        except Exception:
-            pass
-
-        # 2) セル数 >= 28 を 200ms ポーリングで最大 1.6s
-        deadline = time.perf_counter() + 1.6
+        deadline = time.perf_counter() + 1.5
         while time.perf_counter() < deadline:
             try:
                 cells = page.locator(
@@ -291,27 +274,25 @@ def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
                     return
             except Exception:
                 pass
-            page.wait_for_timeout(200)
+            page.wait_for_timeout(150)
 
-        # 3) 最後の保険（visible 500ms 一発）
+        # 保険の visible（300ms 一発）
         sel_cfg = facility.get("calendar_selector") or "table.reservation-calendar"
         try:
-            page.locator(sel_cfg).first.wait_for(state="visible", timeout=500)
+            page.locator(sel_cfg).first.wait_for(state="visible", timeout=300)
             return
         except Exception:
             for alt in ("[role='grid']", "table.reservation-calendar", "table"):
                 try:
-                    page.locator(alt).first.wait_for(state="visible", timeout=500)
+                    page.locator(alt).first.wait_for(state="visible", timeout=300)
                     return
                 except Exception:
                     continue
-        # 4) ここまで来てもダメなら、そのまま続行（後段で locate が失敗すれば例外に）
         print("[WARN] calendar ready check timed out; proceeding optimistically.", flush=True)
 
 def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
     pat = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
     targets: List[str] = []
-    # 1) まず facility のセレクタ／既定セレクタから取得（カレンダー優先）
     if calendar_root is None:
         locs = [
             page.locator("table.reservation-calendar").first,
@@ -329,7 +310,6 @@ def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
             targets.append(calendar_root.inner_text())
         except Exception:
             pass
-    # 2) 保険として body 走査（本来は使われない想定）
     if not targets:
         try:
             targets.append(page.inner_text("body"))
@@ -479,7 +459,6 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
             print(f"[WARN] next-month moved backward: {prev_month_text} -> {cur}", flush=True)
             return False
 
-    # 月遷移後の過待機は無し（すぐ次処理へ）
     return True
 
 # ====== 集計 / 保存（HTML一括パース） ======
