@@ -6,62 +6,104 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write  # ← コミット/プッシュに必要
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
 
-    # 🎯 コンテナを指定：ここがポイント！
+    # Playwright 公式 Python コンテナを使用（ブラウザ同梱）
     container:
       image: mcr.microsoft.com/playwright/python:v1.46.0-jammy
 
     steps:
-      - name: Restrict to JST 05:00–24:00
-        run: |
-          HOUR_JST=$(TZ=Asia/Tokyo date +%H)
-          echo "Current JST hour: ${HOUR_JST}"
-          if [ "$HOUR_JST" -ge 5 ] && [ "$HOUR_JST" -le 23 ]; then
-            echo "Within monitoring window. Continue."
-          else
-            echo "Outside monitoring window. Skip."
-            exit 0
-          fi
-
+      # --- リポジトリチェックアウト ---
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 🎯 Playwrightのインストールは不要！
-      # Browserインストールも不要！
-      # install-deps も不要！
+      # --- 作業ディレクトリと環境の確認（デバッグしやすく） ---
+      - name: Show workspace info
+        run: |
+          echo "PWD=$(pwd)"
+          echo "LS_ROOT:"
+          ls -la
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          python --version
 
+      # --- Git の safe.directory 設定（権限警告の回避） ---
+      - name: Git safe.directory
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      # --- pip キャッシュ（高速化） ---
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # --- 依存のインストール ---
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
 
-      - name: Run monitor
+      # --- config.json の整合性チェック（常に先に検証） ---
+      - name: Validate config.json
+        run: |
+          python -m json.tool config.json > /dev/null
+
+      # --- 監視実行（レポジトリ直下 snapshots/ に保存） ---
+      - name: Run monitor (force)
         env:
-          BASE_URL: ${{ secrets.BASE_URL }}
+          OUTPUT_DIR: snapshots                      # ← レポジトリ直下
+          BASE_URL: ${{ secrets.BASE_URL }}          # 例: https://saitama.rsv.ws-scs.jp/web/
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           PYTHONUNBUFFERED: "1"
+          MONITOR_FORCE: "1"                         # ← 時間帯ガードをバイパス
         run: |
           echo "[INFO] Starting monitor.py ..."
-          python -u monitor.py
+          python -u monitor.py --force
           echo "[INFO] monitor.py finished."
 
-      - name: Show snapshot files
+      # --- 生成物の一覧（更新日時/サイズ付きで詳細表示） ---
+      - name: Show snapshot files (detailed)
         run: |
           echo "----- snapshots tree -----"
-          find snapshots -maxdepth 3 -type f -print || true
-          echo "--------------------------"
+          find snapshots -type f -printf "%T@  %TY-%Tm-%Td %TH:%TM:%TS  %p  %s bytes\n" | sort -n || true
+          echo "----- git status/diff -----"
+          git status snapshots/ || true
+          git diff --name-only snapshots/ || true
 
+      # --- .gitignore で無視されていないか確認＆強制追加 ---
+      - name: Ensure snapshots tracked by Git
+        run: |
+          echo "----- git check-ignore -----"
+          git check-ignore -v snapshots snapshots/** || true
+          # .gitignore に書かれていても強制追加
+          git add -f snapshots/ || true
+
+      # --- Commit & Push （差分が無ければ空コミットで履歴を残す） ---
       - name: Commit & Push snapshot updates
         run: |
           set -e
-          if [[ -n $(git status --porcelain snapshots/) ]]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add snapshots/
+          # 差分があれば普通にコミット
+          if [[ -n "$(git status --porcelain snapshots/)" ]]; then
             git commit -m "chore: update snapshots ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))"
             git push
+          else
+            echo "No changes detected in snapshots/; creating an empty commit for run history."
+            git commit -m "chore: run without snapshot changes ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))" --allow-empty || true
+            git push || true
           fi
+
+      # --- Artifacts にも保存（GUIから直接ダウンロード可能） ---
+      - name: Upload snapshots artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-${{ github.run_id }}
+          path: snapshots/
+          if-no-files-found: warn
