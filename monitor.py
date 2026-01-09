@@ -133,6 +133,50 @@ def grace_pause(page, label: str = "grace wait"):
         except Exception:
             pass
 
+
+def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
+    """
+    カレンダー枠の『描画完了』を短時間で判定する：
+    - networkidle を 1.2s
+    - gridcell/td が 28 個以上になったら即抜け（200ms ポーリング、最大 2s）
+    - 最後の保険で visible 800ms 一発だけ
+    """
+    with time_section("wait calendar root ready"):
+        # 1) networkidle（I/Oの静穏化）を短めで
+        try:
+            page.wait_for_load_state("networkidle", timeout=1200)
+        except Exception:
+            pass
+
+        # 2) セル数 >= 28 を 200ms ポーリングで最大 2s
+        deadline = time.perf_counter() + 2.0
+        while time.perf_counter() < deadline:
+            try:
+                cells = page.locator(
+                    "[role='gridcell'], table.reservation-calendar tbody td, .fc-daygrid-day, .calendar-day"
+                )
+                if cells.count() >= 28:
+                    return
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+
+        # 3) 最後の保険（visible 800ms 一発）
+        sel_cfg = facility.get("calendar_selector") or "table.reservation-calendar"
+        try:
+            page.locator(sel_cfg).first.wait_for(state="visible", timeout=800)
+            return
+        except Exception:
+            for alt in ("[role='grid']", "table.reservation-calendar", "table"):
+                try:
+                    page.locator(alt).first.wait_for(state="visible", timeout=800)
+                    return
+                except Exception:
+                    continue
+        # 4) ここまで来てもダメなら、そのまま続行（後段で locate が失敗すれば例外に）
+        print("[WARN] calendar ready check timed out; proceeding optimistically.", flush=True)
+
+
 # ====== Playwright 操作 ======
 def try_click_text(page, label: str, timeout_ms: int = 5000, quiet=True) -> bool:
     locators = [
