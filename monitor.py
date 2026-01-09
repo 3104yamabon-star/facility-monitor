@@ -4,9 +4,9 @@
 さいたま市 施設予約システムの空き状況監視（高速化＋安定化版）
 - 入口クリック列と月遷移後の grace_wait を撤去し、次画面の具体条件待ちに置換
 - ページ読込直後に CSS アニメーション/トランジションを無効化
-- 施設名クリック（最終ラベル）後は「次ラベルが無い」ため、必ずカレンダー枠の出現を明示的に待機
+- 施設名クリック（最終ラベル）後は「次ラベルが無い」ため、必ずカレンダー枠の出現を短時間でレース待機
 - get_current_year_month_text() はカレンダー枠優先で取得（保険として body 走査を残置）
-- GRACE_MS は保険用に残しつつ、workflow 側で 600ms を設定推奨
+- 入口「次ラベル待ち」を 500ms 上限に短縮、カレンダー準備は ≤2s で判定
 """
 import os
 import sys
@@ -133,50 +133,6 @@ def grace_pause(page, label: str = "grace wait"):
         except Exception:
             pass
 
-
-def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
-    """
-    カレンダー枠の『描画完了』を短時間で判定する：
-    - networkidle を 1.2s
-    - gridcell/td が 28 個以上になったら即抜け（200ms ポーリング、最大 2s）
-    - 最後の保険で visible 800ms 一発だけ
-    """
-    with time_section("wait calendar root ready"):
-        # 1) networkidle（I/Oの静穏化）を短めで
-        try:
-            page.wait_for_load_state("networkidle", timeout=1200)
-        except Exception:
-            pass
-
-        # 2) セル数 >= 28 を 200ms ポーリングで最大 2s
-        deadline = time.perf_counter() + 2.0
-        while time.perf_counter() < deadline:
-            try:
-                cells = page.locator(
-                    "[role='gridcell'], table.reservation-calendar tbody td, .fc-daygrid-day, .calendar-day"
-                )
-                if cells.count() >= 28:
-                    return
-            except Exception:
-                pass
-            page.wait_for_timeout(200)
-
-        # 3) 最後の保険（visible 800ms 一発）
-        sel_cfg = facility.get("calendar_selector") or "table.reservation-calendar"
-        try:
-            page.locator(sel_cfg).first.wait_for(state="visible", timeout=800)
-            return
-        except Exception:
-            for alt in ("[role='grid']", "table.reservation-calendar", "table"):
-                try:
-                    page.locator(alt).first.wait_for(state="visible", timeout=800)
-                    return
-                except Exception:
-                    continue
-        # 4) ここまで来てもダメなら、そのまま続行（後段で locate が失敗すれば例外に）
-        print("[WARN] calendar ready check timed out; proceeding optimistically.", flush=True)
-
-
 # ====== Playwright 操作 ======
 def try_click_text(page, label: str, timeout_ms: int = 5000, quiet=True) -> bool:
     locators = [
@@ -238,10 +194,9 @@ def click_optional_dialogs_fast(page) -> None:
                 except Exception:
                     pass
 
-# === 追加: 次ラベルの「見えるまで待つ」ヘルパー ===
-def wait_next_label_visible(page, next_label: str, timeout_ms: int = 5000) -> bool:   
- # 旧: timeout_ms=5000 → 新: 500
-    timeout_ms = 500
+# === 追加: 次ラベルの「見えるまで待つ」ヘルパー（500ms 上限） ===
+def wait_next_label_visible(page, next_label: str, timeout_ms: int = 5000) -> bool:
+    timeout_ms = 500  # 0.5s に短縮
     candidates = [
         page.get_by_role("link", name=next_label, exact=True),
         page.get_by_role("button", name=next_label, exact=True),
@@ -256,7 +211,30 @@ def wait_next_label_visible(page, next_label: str, timeout_ms: int = 5000) -> bo
             continue
     return False
 
-# === 入口クリック列を「具体条件待ち」に置き換え ===
+# === 追加: クリック後の「次ステップ準備」レース待機（任意ヒント付き） ===
+def wait_next_step_ready(page, next_label: Optional[str] = None, css_hint: Optional[str] = None) -> None:
+    """
+    - networkidle を短く（最大 800ms）
+    - 次ラベルの可視 or ヒントセレクタの存在 のいずれかで即抜け
+    - 上限 1.2s の軽量ポーリング（150ms 間隔）
+    """
+    try:
+        page.wait_for_load_state("networkidle", timeout=800)
+    except Exception:
+        pass
+
+    deadline = time.perf_counter() + 1.2
+    while time.perf_counter() < deadline:
+        try:
+            if next_label and page.get_by_text(next_label, exact=True).count() > 0:
+                return
+            if css_hint and page.locator(css_hint).count() > 0:
+                return
+        except Exception:
+            pass
+        page.wait_for_timeout(150)
+
+# === 入口クリック列：次ラベル待ち（0.5s）＋任意のヒントで高速化 ===
 def click_sequence_fast(page, labels: List[str]) -> None:
     for i, label in enumerate(labels):
         with time_section(f"click_sequence: '{label}'"):
@@ -266,7 +244,11 @@ def click_sequence_fast(page, labels: List[str]) -> None:
         if i + 1 < len(labels):
             nxt = labels[i + 1]
             with time_section("wait next label visible"):
-                wait_next_label_visible(page, nxt, timeout_ms=5000)
+                # まず 0.5s の可視待ち
+                ok = wait_next_label_visible(page, nxt, timeout_ms=500)
+            # 任意：ヒントが分かるなら CSS セレクタでさらにレース待ち（ここでは無指定）
+            with time_section("wait next step ready (race)"):
+                wait_next_step_ready(page, next_label=nxt, css_hint=None)
 
 def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
     if not BASE_URL:
@@ -280,11 +262,51 @@ def navigate_to_facility(page, facility: Dict[str, Any]) -> None:
         # 入口クリック列（具体条件待ちに変更）
         click_sequence_fast(page, facility.get("click_sequence", []))
 
-   
-    # 以前の「wait calendar root visible（合計最大 ~20s）」を廃止し、
-    # こちらの短時間レースで待つ
+    # 最終クリック後は「次ラベル」が無いので、カレンダー枠の準備を短時間でレース待機
     wait_calendar_ready(page, facility)
 
+# === カレンダー準備：≤2s の短時間レース ===
+def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
+    """
+    カレンダー枠の『描画完了』を短時間で判定する：
+    - networkidle を 1.0s
+    - gridcell/td が 28 個以上になったら即抜け（200ms ポーリング、最大 1.6s）
+    - 最後の保険で visible 500ms 一発だけ
+    """
+    with time_section("wait calendar root ready"):
+        # 1) networkidle（I/Oの静穏化）を短めで
+        try:
+            page.wait_for_load_state("networkidle", timeout=1000)
+        except Exception:
+            pass
+
+        # 2) セル数 >= 28 を 200ms ポーリングで最大 1.6s
+        deadline = time.perf_counter() + 1.6
+        while time.perf_counter() < deadline:
+            try:
+                cells = page.locator(
+                    "[role='gridcell'], table.reservation-calendar tbody td, .fc-daygrid-day, .calendar-day"
+                )
+                if cells.count() >= 28:
+                    return
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+
+        # 3) 最後の保険（visible 500ms 一発）
+        sel_cfg = facility.get("calendar_selector") or "table.reservation-calendar"
+        try:
+            page.locator(sel_cfg).first.wait_for(state="visible", timeout=500)
+            return
+        except Exception:
+            for alt in ("[role='grid']", "table.reservation-calendar", "table"):
+                try:
+                    page.locator(alt).first.wait_for(state="visible", timeout=500)
+                    return
+                except Exception:
+                    continue
+        # 4) ここまで来てもダメなら、そのまま続行（後段で locate が失敗すれば例外に）
+        print("[WARN] calendar ready check timed out; proceeding optimistically.", flush=True)
 
 def get_current_year_month_text(page, calendar_root=None) -> Optional[str]:
     pat = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月")
@@ -457,7 +479,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
             print(f"[WARN] next-month moved backward: {prev_month_text} -> {cur}", flush=True)
             return False
 
-    # ★修正版：ここでの grace_pause を撤去（すぐ次処理へ）
+    # 月遷移後の過待機は無し（すぐ次処理へ）
     return True
 
 # ====== 集計 / 保存（HTML一括パース） ======
