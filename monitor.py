@@ -1,13 +1,14 @@
 
 # -*- coding: utf-8 -*-
 """
-さいたま市 施設予約システムの空き状況監視（「館一覧→施設詳細→戻る」最適化版＋タイムスタンプ計測）
+さいたま市 施設予約システムの空き状況監視（「館一覧→施設詳細→戻る」最適化版：タイマー計測＋推奨パッチ）
 
 - 共通導線（施設の空き状況 → 利用目的から → 屋内スポーツ → バドミントン）は最初の1回のみ。
 - 以降は「館一覧（施設選択画面）」から施設詳細へ入り、処理後は画面右上の「戻る」（サイト内）で一覧へ復帰。
+- 「戻る」は専用関数 click_back_to_list() で素早くクリック（テキスト直指定＋短いタイムアウト）。
 - 鈴谷公民館のみ、施設詳細へ入った直後に「すべて」を押す（忘れない）。
 - 監視する月数は config.json の month_shifts に従う（例：岸町・鈴谷=0,1 / 南浦和・岩槻南部=0,1,2,3）。
-- 各所にタイムスタンプ log_ts(label) を挿入し、区間遅延を正確に把握可能。
+- 計測は time_section()（タイマー）で区間時間をログに出力。
 """
 
 import os
@@ -16,7 +17,6 @@ import json
 import re
 import datetime
 import time
-import time as _time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
@@ -61,26 +61,7 @@ FACILITY_TITLE_ALIAS = {
     "鈴谷公民館": "鈴谷",
 }
 
-# ====== タイムスタンプユーティリティ ======
-_PROCESS_START = _time.perf_counter()
-
-def jst_now() -> datetime.datetime:
-    if pytz is None:
-        return datetime.datetime.now()
-    jst = pytz.timezone("Asia/Tokyo")
-    return datetime.datetime.now(jst)
-
-def log_ts(label: str) -> None:
-    """
-    JSTの絶対時刻（HH:MM:SS.mmm）と、プロセス開始からのΔ秒を出力。
-    例: [TS] 22:14:53.042 (+12.381s) back-to-list click (before)
-    """
-    now = jst_now()
-    ms = int(now.microsecond / 1000)
-    delta = _time.perf_counter() - _PROCESS_START
-    print(f"[TS] {now.strftime('%H:%M:%S')}.{ms:03d} (+{delta:.3f}s) {label}", flush=True)
-
-# ====== 汎用TIMER（区間計測用） ======
+# ====== タイマー ======
 @contextmanager
 def time_section(title: str):
     start = time.perf_counter()
@@ -90,6 +71,12 @@ def time_section(title: str):
     finally:
         end = time.perf_counter()
         print(f"[TIMER] {title}: end ({end - start:.3f}s)", flush=True)
+
+def jst_now() -> datetime.datetime:
+    if pytz is None:
+        return datetime.datetime.now()
+    jst = pytz.timezone("Asia/Tokyo")
+    return datetime.datetime.now(jst)
 
 def is_within_monitoring_window(start_hour=5, end_hour=23):
     try:
@@ -161,6 +148,7 @@ def grace_pause(page, label: str = "grace wait"):
 
 # ====== Playwright 基本操作 ======
 def try_click_text(page, label: str, timeout_ms: int = 5000, quiet=True) -> bool:
+    # 汎用（他の場所でも使うため既定は従来タイムアウト）
     probes = [
         page.get_by_role("link", name=label, exact=True),
         page.get_by_role("button", name=label, exact=True),
@@ -182,6 +170,34 @@ def try_click_text(page, label: str, timeout_ms: int = 5000, quiet=True) -> bool
         except Exception as e:
             if not quiet:
                 print(f"[WARN] try_click_text: {e} (label='{label}')", flush=True)
+            continue
+    return False
+
+# === 「戻る」専用：推奨解決策（テキスト直指定＋短いタイムアウト） ===
+def click_back_to_list(page, timeout_ms: int = 1200) -> bool:
+    selectors = [
+        "a:has-text('戻る')",
+        "a:has-text('もどる')",
+        "a[onclick*='gRsvWTransInstSrchPpsPageMoveAction']",
+    ]
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if el.count() > 0:
+                el.scroll_into_view_if_needed()
+                el.click(timeout=timeout_ms)
+                return True
+        except Exception:
+            continue
+    # フォールバック（テキストのみ）
+    for label in ("戻る", "もどる"):
+        try:
+            el = page.get_by_text(label, exact=True).first
+            if el.count() > 0:
+                el.scroll_into_view_if_needed()
+                el.click(timeout=timeout_ms)
+                return True
+        except Exception:
             continue
     return False
 
@@ -229,10 +245,6 @@ HINTS: Dict[str, str] = {
 
 # === クリック後の「次ステップ準備」レース（URL変化 or DOMヒント） ===
 def wait_next_step_ready(page, css_hint: Optional[str] = None) -> None:
-    """
-    - URL変化 or ヒントDOM出現のいずれか成立で即抜け
-    - 上限 0.9s（軽量ポーリング 120ms）
-    """
     deadline = time.perf_counter() + 0.9
     last_url = page.url
     while time.perf_counter() < deadline:
@@ -245,14 +257,15 @@ def wait_next_step_ready(page, css_hint: Optional[str] = None) -> None:
             pass
         page.wait_for_timeout(120)
 
-# === 館一覧で「次施設リンクの可視化」限定待機 ===
+# === 館一覧で「次施設リンク可視」限定待機 ===
 def wait_list_ready_for(page, next_facility_name: Optional[str], timeout_ms: int = 1500):
     if not next_facility_name:
         return
-    try:
-        page.get_by_text(next_facility_name, exact=True).first.wait_for(state="visible", timeout=timeout_ms)
-    except Exception:
-        wait_next_step_ready(page, css_hint=None)
+    with time_section(f"list-ready for '{next_facility_name}'"):
+        try:
+            page.get_by_text(next_facility_name, exact=True).first.wait_for(state="visible", timeout=timeout_ms)
+        except Exception:
+            wait_next_step_ready(page, css_hint=None)
 
 # === カレンダー準備（セル数 or visible保険） ===
 def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
@@ -268,7 +281,6 @@ def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
             except Exception:
                 pass
             page.wait_for_timeout(150)
-        # 保険の visible
         sel_cfg = facility.get("calendar_selector") or "table.reservation-calendar"
         try:
             page.locator(sel_cfg).first.wait_for(state="visible", timeout=300)
@@ -322,7 +334,7 @@ def locate_calendar_root(page, hint: str, facility: Dict[str, Any] = None):
         if sel_cfg:
             loc = page.locator(sel_cfg)
             if loc.count() > 0:
-                return loc.first  # セレクタで即決
+                return loc.first
         candidates = []
         weekday_markers = ["日曜日","月曜日","火曜日","水曜日","木曜日","金曜日","土曜日","日","月","火","水","木","金","土"]
         for sel in ("[role='grid']", "table", "section", "div.calendar", "div"):
@@ -510,7 +522,6 @@ def _find_day_in_text(text: str) -> Optional[str]:
     return m.group(0) if m else None
 
 def summarize_vacancies(page, calendar_root, config):
-    log_ts("summarize_vacancies (start)")
     with time_section("summarize_vacancies(html-parse)"):
         patterns = config["status_patterns"]
         css_class_patterns = config["css_class_patterns"]
@@ -520,10 +531,7 @@ def summarize_vacancies(page, calendar_root, config):
         try:
             html = calendar_root.evaluate("el => el.outerHTML")
         except Exception:
-            log_ts("summarize_vacancies (fallback start)")
-            out = _summarize_vacancies_fallback(page, calendar_root, config)
-            log_ts("summarize_vacancies (fallback end)")
-            return out
+            return _summarize_vacancies_fallback(page, calendar_root, config)
         td_blocks = _extract_td_blocks(html)
         for td in td_blocks:
             inner = td["inner"]
@@ -569,8 +577,7 @@ def summarize_vacancies(page, calendar_root, config):
                 st = "未判定"
             summary[st] += 1
             details.append({"day": day, "status": st, "text": text_like})
-    log_ts("summarize_vacancies (end)")
-    return summary, details
+        return summary, details
 
 def _summarize_vacancies_fallback(page, calendar_root, config):
     with time_section("summarize_vacancies(fallback)"):
@@ -651,7 +658,7 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
         return summary, details
 
 def facility_month_dir(short: str, month_text: str) -> Path:
-    # ✅ 正しいサニタイズ（&lt;/&gt; は使わない）
+    # ✅ 正しいサニタイズ（HTMLエンティティ不要）
     safe_fac = re.sub(r'[\\/:*?"<>|]+', "_", short)
     safe_month = re.sub(r'[\\/:*?"<>|]+', "_", month_text or "unknown_month")
     d = OUTPUT_ROOT / safe_fac / safe_month
@@ -678,7 +685,7 @@ def summaries_changed(prev, cur) -> bool:
     return False
 
 def save_calendar_assets(cal_root, outdir: Path, save_ts: bool):
-    log_ts("save_calendar_assets (start)")
+    print("[TIMER] save_calendar_assets: start", flush=True)
     latest_html = outdir / "calendar.html"
     latest_png = outdir / "calendar.png"
     ts = _dt.now().strftime("%Y%m%d_%H%M%S")
@@ -691,75 +698,8 @@ def save_calendar_assets(cal_root, outdir: Path, save_ts: bool):
         dump_calendar_html(cal_root, html_ts)
         take_calendar_screenshot(cal_root, png_ts)
         ts_html, ts_png = html_ts, png_ts
-    log_ts("save_calendar_assets (end)")
+    print("[TIMER] save_calendar_assets: end", flush=True)
     return latest_html, latest_png, ts_html, ts_png
-
-# ====== 差分通知（祝日表示・絵文字） ======
-IMPROVE_TRANSITIONS = {
-    ("×", "△"),
-    ("△", "○"),
-    ("×", "○"),
-    ("未判定", "△"),
-    ("未判定", "○")
-}
-
-def _parse_month_text(month_text: str) -> Optional[Tuple[int, int]]:
-    m = re.match(r"(\d{4})年(\d{1,2})月", month_text or "")
-    if not m: return None
-    return int(m.group(1)), int(m.group(2))
-
-def _day_str_to_int(day_str: str) -> Optional[int]:
-    m = re.search(r"([1-9]|1\d|2\d|3[01])\s*日", day_str or "")
-    return int(m.group(1)) if m else None
-
-def _weekday_jp(dt: datetime.date) -> str:
-    names = ["月","火","水","木","金","土","日"]
-    return names[dt.weekday()]
-
-def _is_japanese_holiday(dt: datetime.date) -> bool:
-    if not INCLUDE_HOLIDAY_FLAG: return False
-    if jpholiday is None: return False
-    try: return jpholiday.is_holiday(dt)
-    except Exception: return False
-
-_STATUS_EMOJI = {
-    "×": "✖️",
-    "△": "🔼",
-    "○": "⭕️",
-    "未判定": "❓",
-}
-def _decorate_status(st: str) -> str:
-    st = st or "未判定"
-    return _STATUS_EMOJI.get(st, "❓")
-
-def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cur_details: List[Dict[str,str]]) -> List[str]:
-    ym = _parse_month_text(month_text)
-    if not ym: return []
-    y, mo = ym
-    prev_map: Dict[int, str] = {}
-    cur_map: Dict[int, str] = {}
-    for d in (prev_details or []):
-        di = _day_str_to_int(d.get("day",""))
-        if di is not None:
-            prev_map[di] = d.get("status","未判定")
-    for d in (cur_details or []):
-        di = _day_str_to_int(d.get("day",""))
-        if di is not None:
-            cur_map[di] = d.get("status","未判定")
-    lines: List[str] = []
-    for di, cur_st in sorted(cur_map.items()):
-        prev_st = prev_map.get(di)
-        if prev_st is None:
-            continue
-        if (prev_st, cur_st) in IMPROVE_TRANSITIONS:
-            dt = datetime.date(y, mo, di)
-            wd = _weekday_jp(dt)
-            wd_part = f"{wd}・祝" if _is_japanese_holiday(dt) else wd
-            prev_fmt = _decorate_status(prev_st)
-            cur_fmt = _decorate_status(cur_st)
-            line = f"{y}年{mo}月{di}日 ({wd_part}) : {prev_fmt} → {cur_fmt}"
-            lines.append(line)
-    return lines
 
 # ====== Discord 通知クライアント ======
 DISCORD_CONTENT_LIMIT = 2000
@@ -951,7 +891,7 @@ def navigate_to_common_list(page, config: Dict[str, Any]) -> None:
             page.wait_for_timeout(120)
     print("[WARN] 館一覧の可視確認が弱いまま次へ進みます。", flush=True)
 
-# ====== 施設1件の処理（一覧→詳細→『戻る』）＋タイムスタンプ ======
+# ====== 施設1件の処理（一覧→詳細→『戻る』） ======
 def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[str, Any], next_facility_name: Optional[str] = None) -> None:
     fac_name = facility_cfg.get("name", "").strip()
     if not fac_name:
@@ -959,51 +899,39 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
 
     print(f"[INFO] process facility (from list): {fac_name}", flush=True)
 
-    # 館一覧で施設名クリックの前後
-    log_ts(f"facility click '{fac_name}' (before)")
-    ok = try_click_text(page, fac_name, timeout_ms=5000)
-    if not ok:
-        log_ts(f"facility click '{fac_name}' failed")
-        raise RuntimeError(f"館リンクが一覧で見つかりません: {fac_name}")
-    log_ts(f"facility click '{fac_name}' (after)")
+    # 館一覧で施設名クリック（タイマー）
+    with time_section(f"facility click '{fac_name}'"):
+        ok = try_click_text(page, fac_name, timeout_ms=5000)
+        if not ok:
+            raise RuntimeError(f"館リンクが一覧で見つかりません: {fac_name}")
 
-    # 軽いロード待機（短め）
-    page.wait_for_load_state("domcontentloaded", timeout=600)
-    log_ts(f"after domcontentloaded for '{fac_name}'")
+    # 施設詳細の初期ロード（短め待機）
+    with time_section(f"domcontentloaded '{fac_name}'"):
+        page.wait_for_load_state("domcontentloaded", timeout=600)
 
-    # カレンダー準備の開始／終了
-    log_ts("wait calendar root ready (start)")
+    # カレンダー準備（既存タイマー内）
     wait_calendar_ready(page, facility_cfg)
-    log_ts("wait calendar root ready (end)")
 
     # 鈴谷のみ「すべて」押下（詳細画面）
     seq = facility_cfg.get("click_sequence", [])
     if fac_name == "鈴谷公民館" or ("すべて" in seq):
-        log_ts("鈴谷: すべて click (before)")
-        try_click_text(page, "すべて", timeout_ms=3000)
-        log_ts("鈴谷: すべて click (after)")
-        page.wait_for_timeout(250)
-        log_ts("鈴谷: すべて applied (250ms wait done)")
+        with time_section("suzutani: click 'すべて'"):
+            try_click_text(page, "すべて", timeout_ms=3000)
+            page.wait_for_timeout(250)  # 簡易適用待ち
 
     # 当月処理
     month_text = get_current_year_month_text(page) or "unknown"
-    log_ts("locate_calendar_root (start)")
     cal_root = locate_calendar_root(page, month_text or "予約カレンダー", facility_cfg)
-    log_ts("locate_calendar_root (end)")
     short = FACILITY_TITLE_ALIAS.get(fac_name, fac_name) or fac_name
     outdir = facility_month_dir(short or "unknown_facility", month_text)
     print(f"[INFO] outdir={outdir}", flush=True)
 
-    log_ts("summarize (start)")
     summary, details = summarize_vacancies(page, cal_root, config)
-    log_ts("summarize (end)")
     prev_payload = load_last_payload(outdir)
     prev_summary = (prev_payload or {}).get("summary")
     prev_details = (prev_payload or {}).get("details") or []
     changed = summaries_changed(prev_summary, summary)
-    log_ts("save assets (start)")
     latest_html, latest_png, ts_html, ts_png = save_calendar_assets(cal_root, outdir, save_ts=changed)
-    log_ts("save assets (end)")
     payload = {
         "month": month_text, "facility": fac_name,
         "summary": summary, "details": details,
@@ -1025,9 +953,7 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
     max_shift = max(shifts)
     prev_month_text = month_text
     for step in range(1, max_shift + 1):
-        log_ts(f"next-month (step={step}) click (start)")
         ok_next = click_next_month(page, calendar_root=cal_root, prev_month_text=prev_month_text, wait_timeout_ms=20000, facility=facility_cfg)
-        log_ts(f"next-month (step={step}) click (end)")
         if not ok_next:
             dbg = OUTPUT_ROOT / "_debug"; safe_mkdir(dbg)
             with time_section(f"screenshot fail step={step}"):
@@ -1035,28 +961,21 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
             print(f"[WARN] next-month click failed at step={step}", flush=True)
             break
 
-        log_ts(f"get_current_month_text (step={step}) (start)")
-        month_text2 = get_current_year_month_text(page) or f"shift_{step}"
-        log_ts(f"get_current_month_text (step={step}) (end)")
-        print(f"[INFO] month(step={step}): {month_text2}", flush=True)
+        with time_section(f"get_current_month_text(step={step})"):
+            month_text2 = get_current_year_month_text(page) or f"shift_{step}"
+            print(f"[INFO] month(step={step}): {month_text2}", flush=True)
 
-        log_ts(f"locate_calendar_root (step={step}) (start)")
         cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー", facility_cfg)
-        log_ts(f"locate_calendar_root (step={step}) (end)")
         outdir2 = facility_month_dir(short or "unknown_facility", month_text2)
         print(f"[INFO] outdir(step={step})={outdir2}", flush=True)
 
         if step in shifts:
-            log_ts(f"summarize (step={step}) (start)")
             summary2, details2 = summarize_vacancies(page, cal_root2, config)
-            log_ts(f"summarize (step={step}) (end)")
             prev_payload2 = load_last_payload(outdir2)
             prev_summary2 = (prev_payload2 or {}).get("summary")
             prev_details2 = (prev_payload2 or {}).get("details") or []
             changed2 = summaries_changed(prev_summary2, summary2)
-            log_ts(f"save assets (step={step}) (start)")
             latest_html2, latest_png2, ts_html2, ts_png2 = save_calendar_assets(cal_root2, outdir2, save_ts=changed2)
-            log_ts(f"save assets (step={step}) (end)")
             payload2 = {
                 "month": month_text2, "facility": fac_name,
                 "summary": summary2, "details": details2,
@@ -1075,25 +994,17 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
         cal_root = cal_root2
         prev_month_text = month_text2
 
-    # ---- 施設処理の最後：画面右上の「戻る」で館一覧へ戻る ----
-    log_ts("back-to-list click (before)")
-    back_labels = ["戻る", "もどる"]  # カレンダー画面は「戻る」、館一覧の上部は「もどる」
-    back_ok = False
-    for bl in back_labels:
-        if try_click_text(page, bl, timeout_ms=3000):
-            back_ok = True
-            break
-    log_ts("back-to-list click (after)")
+    # ---- 施設処理の最後：画面右上の「戻る」で館一覧へ戻る（推奨解決策を使用） ----
+    with time_section("back-to-list click"):
+        back_ok = click_back_to_list(page, timeout_ms=1200)
 
     if not back_ok:
         print("[WARN] 『戻る/もどる』のクリックに失敗。共通導線から再入します。", flush=True)
         navigate_to_common_list(page, config)
     else:
-        # 館一覧で「次施設のリンクが可視になるまで」限定待機（次施設名が分かる場合のみ）
+        # 館一覧で「次施設リンク可視」限定待機（次施設名が分かる場合のみ）
         if next_facility_name:
-            log_ts(f"wait-list-ready for '{next_facility_name}' (start)")
             wait_list_ready_for(page, next_facility_name, timeout_ms=1200)
-            log_ts(f"wait-list-ready for '{next_facility_name}' (end)")
         else:
             wait_next_step_ready(page, css_hint=None)
 
@@ -1120,16 +1031,13 @@ def run_monitor_flow():
 
         # 館一覧から各施設へ入り、処理後は「戻る」で一覧へ戻る
         for idx, facility in enumerate(facilities):
-            # 次施設名（一覧復帰時の限定待機に使用）
             next_fac_name = None
             if idx + 1 < len(facilities):
                 next_fac_name = facilities[idx + 1].get("name", None)
 
             # 次施設に入る前の限定待機（安全確認）
             nm = facility.get("name","")
-            log_ts(f"next-facility pre-check '{nm}' (start)")
             wait_list_ready_for(page, next_facility_name=nm, timeout_ms=1200)
-            log_ts(f"next-facility pre-check '{nm}' (end)")
 
             try:
                 process_one_facility_cycle(page, facility, config, next_facility_name=next_fac_name)
@@ -1179,7 +1087,7 @@ def main():
     run_monitor_flow()
 
 if __name__ == "__main__":
-    print("[INFO] Starting monitor_flow_back_ts.py ...", flush=True)
+    print("[INFO] Starting monitor_flow_back_timer.py ...", flush=True)
     print(f"[INFO] BASE_DIR={BASE_DIR} cwd={Path.cwd()} OUTPUT_ROOT={OUTPUT_ROOT}", flush=True)
     main()
-    print("[INFO] monitor_flow_back_ts.py finished.", flush=True)
+    print("[INFO] monitor_flow_back_timer.py finished.", flush=True)
