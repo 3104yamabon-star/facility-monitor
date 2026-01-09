@@ -1,11 +1,11 @@
 
 # -*- coding: utf-8 -*-
 """
-さいたま市 施設予約システムの空き状況監視（「館一覧→施設詳細→戻る」最適化版：タイマー計測＋推奨パッチ）
+さいたま市 施設予約システムの空き状況監視（「館一覧→施設詳細→戻る」最適化版：タイマー＋専用戻るクリック）
 
 - 共通導線（施設の空き状況 → 利用目的から → 屋内スポーツ → バドミントン）は最初の1回のみ。
 - 以降は「館一覧（施設選択画面）」から施設詳細へ入り、処理後は画面右上の「戻る」（サイト内）で一覧へ復帰。
-- 「戻る」は専用関数 click_back_to_list() で素早くクリック（テキスト直指定＋短いタイムアウト）。
+- 「戻る」は専用関数 click_back_to_list() で素早く・確実にクリック（フレーム横断＋テキスト／onclick 属性対応）。
 - 鈴谷公民館のみ、施設詳細へ入った直後に「すべて」を押す（忘れない）。
 - 監視する月数は config.json の month_shifts に従う（例：岸町・鈴谷=0,1 / 南浦和・岩槻南部=0,1,2,3）。
 - 計測は time_section()（タイマー）で区間時間をログに出力。
@@ -60,82 +60,6 @@ FACILITY_TITLE_ALIAS = {
     "岸町公民館": "岸町",
     "鈴谷公民館": "鈴谷",
 }
-
-# ====== 差分通知（祝日表示・絵文字） ======
-IMPROVE_TRANSITIONS = {
-    ("×", "△"),
-    ("△", "○"),
-    ("×", "○"),
-    ("未判定", "△"),
-    ("未判定", "○"),
-}
-
-def _parse_month_text(month_text: str) -> Optional[Tuple[int, int]]:
-    m = re.match(r"(\d{4})年(\d{1,2})月", month_text or "")
-    if not m: return None
-    return int(m.group(1)), int(m.group(2))
-
-def _day_str_to_int(day_str: str) -> Optional[int]:
-    m = re.search(r"([1-9]|1\d|2\d|3[01])\s*日", day_str or "")
-    return int(m.group(1)) if m else None
-
-def _weekday_jp(dt: datetime.date) -> str:
-    names = ["月","火","水","木","金","土","日"]
-    return names[dt.weekday()]
-
-def _is_japanese_holiday(dt: datetime.date) -> bool:
-    # INCLUDE_HOLIDAY_FLAG と jpholiday がグローバルにある前提
-    if not INCLUDE_HOLIDAY_FLAG: return False
-    if jpholiday is None: return False
-    try: return jpholiday.is_holiday(dt)
-    except Exception: return False
-
-_STATUS_EMOJI = {
-    "×": "✖️",
-    "△": "🔼",
-    "○": "⭕️",
-    "未判定": "❓",
-}
-
-def _decorate_status(st: str) -> str:
-    st = st or "未判定"
-    return _STATUS_EMOJI.get(st, "❓")
-
-def build_aggregate_lines(month_text: str,
-                          prev_details: List[Dict[str,str]],
-                          cur_details:  List[Dict[str,str]]) -> List[str]:
-    """
-    直近実行と前回実行の詳細（day/status）差分から、改善（×→△、△→○ など）を抽出して
-    Discordに送る短文の配列を生成します。
-    """
-    ym = _parse_month_text(month_text)
-    if not ym: return []
-    y, mo = ym
-    prev_map: Dict[int, str] = {}
-    cur_map:  Dict[int, str] = {}
-    for d in (prev_details or []):
-        di = _day_str_to_int(d.get("day",""))
-        if di is not None:
-            prev_map[di] = d.get("status","未判定")
-    for d in (cur_details or []):
-        di = _day_str_to_int(d.get("day",""))
-        if di is not None:
-            cur_map[di] = d.get("status","未判定")
-
-    lines: List[str] = []
-    for di, cur_st in sorted(cur_map.items()):
-        prev_st = prev_map.get(di)
-        if prev_st is None:
-            continue
-        if (prev_st, cur_st) in IMPROVE_TRANSITIONS:
-            dt = datetime.date(y, mo, di)
-            wd = _weekday_jp(dt)
-            wd_part = f"{wd}・祝" if _is_japanese_holiday(dt) else wd
-            prev_fmt = _decorate_status(prev_st)
-            cur_fmt  = _decorate_status(cur_st)
-            line = f"{y}年{mo}月{di}日 ({wd_part}) : {prev_fmt} → {cur_fmt}"
-            lines.append(line)
-    return lines
 
 # ====== タイマー ======
 @contextmanager
@@ -249,34 +173,6 @@ def try_click_text(page, label: str, timeout_ms: int = 5000, quiet=True) -> bool
             continue
     return False
 
-# === 「戻る」専用：推奨解決策（テキスト直指定＋短いタイムアウト） ===
-def click_back_to_list(page, timeout_ms: int = 1200) -> bool:
-    selectors = [
-        "a:has-text('戻る')",
-        "a:has-text('もどる')",
-        "a[onclick*='gRsvWTransInstSrchPpsPageMoveAction']",
-    ]
-    for sel in selectors:
-        try:
-            el = page.locator(sel).first
-            if el.count() > 0:
-                el.scroll_into_view_if_needed()
-                el.click(timeout=timeout_ms)
-                return True
-        except Exception:
-            continue
-    # フォールバック（テキストのみ）
-    for label in ("戻る", "もどる"):
-        try:
-            el = page.get_by_text(label, exact=True).first
-            if el.count() > 0:
-                el.scroll_into_view_if_needed()
-                el.click(timeout=timeout_ms)
-                return True
-        except Exception:
-            continue
-    return False
-
 OPTIONAL_DIALOG_LABELS = ["同意する", "OK", "確認", "閉じる"]
 def click_optional_dialogs_fast(page) -> None:
     for label in OPTIONAL_DIALOG_LABELS:
@@ -342,6 +238,65 @@ def wait_list_ready_for(page, next_facility_name: Optional[str], timeout_ms: int
             page.get_by_text(next_facility_name, exact=True).first.wait_for(state="visible", timeout=timeout_ms)
         except Exception:
             wait_next_step_ready(page, css_hint=None)
+
+# === 「戻る」専用：フレーム横断＋多段セレクタ＋onclickマッチ（推奨解決策） ===
+def click_back_to_list(page, timeout_ms: int = 1500) -> bool:
+    """
+    施設詳細（カレンダー）画面右上の『戻る』を最優先でクリックする。
+    - すべてのフレームを横断して探索
+    - a / button / input[type=button|submit] / area なども対象
+    - onclick に予約システムの戻りアクションが含まれる場合は属性でクリック
+    - テキストは『戻る』と『もどる』を両方試す（正確一致と部分一致）
+    """
+    try:
+        frames = [page] + list(page.frames)
+
+        selector_sets = [
+            ["a:has-text('戻る')", "button:has-text('戻る')", "a:has-text('もどる')", "button:has-text('もどる')"],
+            ["a:has-text('戻')", "button:has-text('戻')"],  # 緩和
+            ["a[onclick*='gRsvWTransInstSrchPpsPageMoveAction']",
+             "a[onclick*='InstSrchPpsPageMoveAction']",
+             "[onclick*='gRsvWTransInstSrchPpsPageMoveAction']"],
+            ["input[type='button'][value='戻る']",
+             "input[type='submit'][value='戻る']",
+             "input[onclick*='gRsvWTransInstSrchPpsPageMoveAction']"],
+            ["area[alt='戻る']", "area[title='戻る']"],
+        ]
+
+        for fr in frames:
+            # 1) セレクタベース
+            for sels in selector_sets:
+                for sel in sels:
+                    try:
+                        el = fr.locator(sel).first
+                        if el.count() > 0:
+                            el.scroll_into_view_if_needed()
+                            el.click(timeout=timeout_ms)
+                            return True
+                    except Exception:
+                        continue
+            # 2) テキストノードのみ（span/div等）
+            for label in ("戻る", "もどる"):
+                try:
+                    el = fr.get_by_text(label, exact=True).first
+                    if el.count() > 0:
+                        el.scroll_into_view_if_needed()
+                        el.click(timeout=timeout_ms)
+                        return True
+                except Exception:
+                    continue
+            # 3) onclick 属性を直接発火（最終手段）
+            try:
+                handles = fr.locator("[onclick*='InstSrchPpsPageMoveAction']").element_handles()
+                for h in handles:
+                    fr.evaluate_handle("el => el.scrollIntoView({block:'center'})", h)
+                    fr.evaluate_handle("el => el.click()", h)
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
 
 # === カレンダー準備（セル数 or visible保険） ===
 def wait_calendar_ready(page, facility: Dict[str, Any]) -> None:
@@ -777,153 +732,72 @@ def save_calendar_assets(cal_root, outdir: Path, save_ts: bool):
     print("[TIMER] save_calendar_assets: end", flush=True)
     return latest_html, latest_png, ts_html, ts_png
 
-# ====== Discord 通知クライアント ======
-DISCORD_CONTENT_LIMIT = 2000
-DISCORD_EMBED_DESC_LIMIT = 4096
-
-def _split_content(s: str, limit: int = DISCORD_CONTENT_LIMIT) -> List[str]:
-    out: List[str] = []
-    cur = (s or "").strip()
-    while len(cur) > limit:
-        cut = cur.rfind("\n", 0, limit)
-        if cut < 0: cut = cur.rfind(" ", 0, limit)
-        if cut < 0: cut = limit
-        out.append(cur[:cut].rstrip())
-        cur = cur[cut:].lstrip()
-    if cur:
-        out.append(cur)
-    return out
-
-def _truncate_embed_description(desc: str) -> str:
-    if desc is None: return ""
-    if len(desc) <= DISCORD_EMBED_DESC_LIMIT: return desc
-    return desc[:DISCORD_EMBED_DESC_LIMIT - 3] + "..."
-
-class DiscordWebhookClient:
-    def __init__(self, webhook_url: str, thread_id: Optional[str] = None, wait: bool = True,
-                 user_agent: Optional[str] = None, timeout_sec: int = 10):
-        if not webhook_url:
-            raise ValueError("webhook_url is required")
-        self.webhook_url = webhook_url
-        self.thread_id = thread_id
-        self.wait = wait
-        self.timeout_sec = timeout_sec
-        self.user_agent = user_agent or "facility-monitor/1.0 (+python-urllib)"
-
-    @staticmethod
-    def from_env() -> "DiscordWebhookClient":
-        url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
-        th = os.getenv("DISCORD_THREAD_ID", "").strip() or None
-        wt = os.getenv("DISCORD_WAIT", "1").strip() == "1"
-        ua = os.getenv("DISCORD_USER_AGENT", "").strip() or None
-        return DiscordWebhookClient(webhook_url=url, thread_id=th, wait=wt, user_agent=ua)
-
-    def _post(self, payload: Dict[str, Any]) -> Tuple[int, str, Dict[str, Any]]:
-        import urllib.request, urllib.error, ssl
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        url = self.webhook_url
-        params = []
-        if self.wait: params.append("wait=true")
-        if self.thread_id: params.append(f"thread_id={self.thread_id}")
-        if params: url = f"{url}?{'&'.join(params)}"
-        req = urllib.request.Request(url=url, data=data,
-                                     headers={"Content-Type": "application/json", "User-Agent": self.user_agent})
-        ctx = ssl.create_default_context()
-        tries = 0
-        max_tries = 3
-        while True:
-            tries += 1
-            try:
-                with urllib.request.urlopen(req, context=ctx, timeout=self.timeout_sec) as resp:
-                    body = resp.read().decode("utf-8", errors="ignore")
-                    status = getattr(resp, "status", 200)
-                    headers = dict(resp.headers) if resp.headers else {}
-                    return status, body, headers
-            except urllib.error.HTTPError as e:
-                status = e.code
-                try:
-                    body = e.read().decode("utf-8", errors="ignore")
-                except Exception:
-                    body = ""
-                headers = dict(e.headers) if e.headers else {}
-                if status == 429 and tries < max_tries:
-                    retry_after = float(headers.get("Retry-After", "1.0"))
-                    print(f"[WARN] Discord 429: retry_after={retry_after}s; body={body}", flush=True)
-                    time.sleep(max(0.5, retry_after))
-                    continue
-                return status, body, headers
-            except Exception as e:
-                return -1, f"Exception: {e}", {}
-
-    def send_embed(self, title: str, description: str, color: int = 0x00B894, footer_text: str = "Facility monitor") -> bool:
-        embed = {
-            "title": title,
-            "description": _truncate_embed_description(description or ""),
-            "color": color,
-            "timestamp": jst_now().isoformat(),
-            "footer": {"text": footer_text},
-        }
-        payload = {"embeds": [embed]}
-        status, body, headers = self._post(payload)
-        if status in (200, 204):
-            print(f"[INFO] Discord notified (embed): title='{title}' len={len(description or '')} body={body}", flush=True)
-            return True
-        print(f"[WARN] Embed failed: HTTP {status}; body={body}. Falling back to plain text.", flush=True)
-        text = f"**{title}**\n{description or ''}"
-        return self.send_text(text)
-
-    def send_text(self, content: str) -> bool:
-        pages = _split_content(content or "", limit=DISCORD_CONTENT_LIMIT)
-        ok_all = True
-        for i, page in enumerate(pages, 1):
-            payload = {"content": page}
-            status, body, headers = self._post(payload)
-            if status in (200, 204):
-                print(f"[INFO] Discord notified (text p{i}/{len(pages)}): {len(page)} chars body={body}", flush=True)
-            else:
-                ok_all = False
-                print(f"[ERROR] Discord text failed (p{i}/{len(pages)}): HTTP {status} body={body}", flush=True)
-        return ok_all
-
-# 施設ごとの色（既存色分け）
-_FACILITY_ALIAS_COLOR_HEX = {
-    "南浦和": "0x3498DB",  # Blue
-    "岩槻": "0x2ECC71",    # Green
-    "鈴谷": "0xF1C40F",    # Yellow
-    "岸町": "0xE74C3C",    # Red
+# ====== 差分通知（祝日表示・絵文字） ======
+IMPROVE_TRANSITIONS = {
+    ("×", "△"),
+    ("△", "○"),
+    ("×", "○"),
+    ("未判定", "△"),
+    ("未判定", "○")
 }
-_DEFAULT_COLOR_HEX = "0x00B894"
 
-def _hex_to_int(hex_str: str) -> int:
-    try:
-        return int(hex_str, 16)
-    except Exception:
-        return int(_DEFAULT_COLOR_HEX, 16)
+def _parse_month_text(month_text: str) -> Optional[Tuple[int, int]]:
+    m = re.match(r"(\d{4})年(\d{1,2})月", month_text or "")
+    if not m: return None
+    return int(m.group(1)), int(m.group(2))
 
-def send_aggregate_lines(webhook_url: Optional[str], facility_alias: str, month_text: str, lines: List[str]) -> None:
-    if not webhook_url or not lines:
-        return
-    force_text = (os.getenv("DISCORD_FORCE_TEXT", "0").strip() == "1")
-    max_lines_env = os.getenv("DISCORD_MAX_LINES", "").strip()
-    max_lines = None
-    try:
-        if max_lines_env:
-            max_lines = max(1, int(max_lines_env))
-    except Exception:
-        max_lines = None
-    if max_lines is not None and len(lines) > max_lines:
-        lines = lines[:max_lines] + [f"... ほか {len(lines) - max_lines} 件"]
-    title = f"{facility_alias} {month_text}"
-    description = "\n".join(lines)
-    color_hex = _FACILITY_ALIAS_COLOR_HEX.get(facility_alias, _DEFAULT_COLOR_HEX)
-    color_int = _hex_to_int(color_hex)
-    client = DiscordWebhookClient.from_env()
-    client.webhook_url = webhook_url  # 明示引数を優先
-    if force_text:
-        content = f"**{title}**\n{description}"
-        client.send_text(content)
-        return
-    client.send_embed(title=title, description=description, color=color_int, footer_text="Facility monitor")
+def _day_str_to_int(day_str: str) -> Optional[int]:
+    m = re.search(r"([1-9]|1\d|2\d|3[01])\s*日", day_str or "")
+    return int(m.group(1)) if m else None
+
+def _weekday_jp(dt: datetime.date) -> str:
+    names = ["月","火","水","木","金","土","日"]
+    return names[dt.weekday()]
+
+def _is_japanese_holiday(dt: datetime.date) -> bool:
+    if not INCLUDE_HOLIDAY_FLAG: return False
+    if jpholiday is None: return False
+    try: return jpholiday.is_holiday(dt)
+    except Exception: return False
+
+_STATUS_EMOJI = {
+    "×": "✖️",
+    "△": "🔼",
+    "○": "⭕️",
+    "未判定": "❓",
+}
+def _decorate_status(st: str) -> str:
+    st = st or "未判定"
+    return _STATUS_EMOJI.get(st, "❓")
+
+def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cur_details: List[Dict[str,str]]) -> List[str]:
+    ym = _parse_month_text(month_text)
+    if not ym: return []
+    y, mo = ym
+    prev_map: Dict[int, str] = {}
+    cur_map: Dict[int, str] = {}
+    for d in (prev_details or []):
+        di = _day_str_to_int(d.get("day",""))
+        if di is not None:
+            prev_map[di] = d.get("status","未判定")
+    for d in (cur_details or []):
+        di = _day_str_to_int(d.get("day",""))
+        if di is not None:
+            cur_map[di] = d.get("status","未判定")
+    lines: List[str] = []
+    for di, cur_st in sorted(cur_map.items()):
+        prev_st = prev_map.get(di)
+        if prev_st is None:
+            continue
+        if (prev_st, cur_st) in IMPROVE_TRANSITIONS:
+            dt = datetime.date(y, mo, di)
+            wd = _weekday_jp(dt)
+            wd_part = f"{wd}・祝" if _is_japanese_holiday(dt) else wd
+            prev_fmt = _decorate_status(prev_st)
+            cur_fmt = _decorate_status(cur_st)
+            line = f"{y}年{mo}月{di}日 ({wd_part}) : {prev_fmt} → {cur_fmt}"
+            lines.append(line)
+    return lines
 
 # ====== 共通導線1回（館一覧へ） ======
 def navigate_to_common_list(page, config: Dict[str, Any]) -> None:
@@ -1072,7 +946,7 @@ def process_one_facility_cycle(page, facility_cfg: Dict[str, Any], config: Dict[
 
     # ---- 施設処理の最後：画面右上の「戻る」で館一覧へ戻る（推奨解決策を使用） ----
     with time_section("back-to-list click"):
-        back_ok = click_back_to_list(page, timeout_ms=1200)
+        back_ok = click_back_to_list(page, timeout_ms=1500)
 
     if not back_ok:
         print("[WARN] 『戻る/もどる』のクリックに失敗。共通導線から再入します。", flush=True)
@@ -1163,7 +1037,7 @@ def main():
     run_monitor_flow()
 
 if __name__ == "__main__":
-    print("[INFO] Starting monitor_flow_back_timer.py ...", flush=True)
+    print("[INFO] Starting monitor_flow_back_timer_fix.py ...", flush=True)
     print(f"[INFO] BASE_DIR={BASE_DIR} cwd={Path.cwd()} OUTPUT_ROOT={OUTPUT_ROOT}", flush=True)
     main()
-    print("[INFO] monitor_flow_back_timer.py finished.", flush=True)
+    print("[INFO] monitor_flow_back_timer_fix.py finished.", flush=True)
