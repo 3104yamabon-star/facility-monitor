@@ -932,7 +932,7 @@ def send_aggregate_lines(webhook_url: Optional[str], facility_alias: str, month_
         max_lines = None
     if max_lines is not None and len(lines) > max_lines:
         lines = lines[:max_lines] + [f"... ほか {len(lines) - max_lines} 件"]
-    title = f"{facility_alias} {month_text} "
+    title = f"{facility_alias} "
     description = "\n".join(lines)
     color_hex = _FACILITY_ALIAS_COLOR_HEX.get(facility_alias, _DEFAULT_COLOR_HEX)
     color_int = _hex_to_int(color_hex)
