@@ -861,35 +861,35 @@ class DiscordWebhookClient:
 
     # ---- ここからメンション対応 ----
     
-def send_embed(self, title: str, description: str, color: int = 0x00B894, footer_text: str = "Facility monitor") -> bool:
-    # メンション情報の生成
-    mention, allowed = _build_mention_and_allowed()
-
-    # 通知プレビューで読めるよう、本文(content)にも要約を入れる
-    # description の先頭1行をサマリにする（必要に応じて複数行に拡張可）
-    one_line = (description or "").splitlines()[0] if description else ""
-
-    # 本文は「メンション + 施設名(太字) + サマリ1行」
-    content = f"{mention} **{title}** — {one_line}".strip() if (mention or one_line or title) else ""
-
-    # Embed 本体（従来どおり。色・フッター・時刻は維持）
-    embed = {
-        "title": title,
-        "description": _truncate_embed_description(description or ""),
-        "color": color,
-        "timestamp": jst_now().isoformat(),  # JSTのISO表記
-        "footer": {"text": footer_text},
-    }
-
-    # payload: 本文 + Embed + allowed_mentions
-    payload = {"content": content, "embeds": [embed], **allowed}
-
-    # 送信
-    print("[DEBUG] payload preview:", json.dumps(payload, ensure_ascii=False), flush=True)
-    status, body, headers = self._post(payload)
-    if status in (200, 204):
-        print(f"[INFO] Discord notified (embed): title='{title}' len={len(description or '')} body={body}", flush=True)
-        return True
+    def send_embed(self, title: str, description: str, color: int = 0x00B894, footer_text: str = "Facility monitor") -> bool:
+        # メンション情報の生成
+        mention, allowed = _build_mention_and_allowed()
+    
+        # 通知プレビューで読めるよう、本文(content)にも要約を入れる
+        # description の先頭1行をサマリにする（必要に応じて複数行に拡張可）
+        one_line = (description or "").splitlines()[0] if description else ""
+    
+        # 本文は「メンション + 施設名(太字) + サマリ1行」
+        content = f"{mention} **{title}** — {one_line}".strip() if (mention or one_line or title) else ""
+    
+        # Embed 本体（従来どおり。色・フッター・時刻は維持）
+        embed = {
+            "title": title,
+            "description": _truncate_embed_description(description or ""),
+            "color": color,
+            "timestamp": jst_now().isoformat(),  # JSTのISO表記
+            "footer": {"text": footer_text},
+        }
+    
+        # payload: 本文 + Embed + allowed_mentions
+        payload = {"content": content, "embeds": [embed], **allowed}
+    
+        # 送信
+        print("[DEBUG] payload preview:", json.dumps(payload, ensure_ascii=False), flush=True)
+        status, body, headers = self._post(payload)
+        if status in (200, 204):
+            print(f"[INFO] Discord notified (embed): title='{title}' len={len(description or '')} body={body}", flush=True)
+            return True
 
     # 失敗時はテキストにフォールバック
     print(f"[WARN] Embed failed: HTTP {status}; body={body}. Falling back to plain text.", flush=True)
