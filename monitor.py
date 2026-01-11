@@ -5,11 +5,16 @@
 - 入口クリック後の待機を「イベントレース一本化（URL変化 or 特徴DOM出現 ≤0.9s）」に変更
 - カレンダー準備を「セル数>=28 ポーリング（150ms, ≤1.5s）＋ visible 保険300ms」に固定
 - 不要リソース（フォント/解析）ブロックをオプションで有効化可能（FAST_ROUTES=1）
+
 【追記（通知強化）】
-- Discord Webhook 通知時に「未読バッジ（赤バッジ）」を確実に付けるためのメンション（<@USER_ID> / @everyone / @here）をサポート
+- Discord Webhook 通知時に「未読バッジ（赤バッジ）」を確実に付けるためのメンション対応
 - content に明示的にメンションを付与
 - allowed_mentions を payload に付与（Webhookの既定抑止を回避）
+
+【追記（世代管理）】
+- スナップショット（calendar_*.png / calendar_*.html）を施設/月フォルダごとにローテーション削除
 """
+
 import os
 import sys
 import json
@@ -38,6 +43,7 @@ MONITOR_START_HOUR = int(os.getenv("MONITOR_START_HOUR", "5"))
 MONITOR_END_HOUR = int(os.getenv("MONITOR_END_HOUR", "23"))
 TIMING_VERBOSE = os.getenv("TIMING_VERBOSE", "0").strip() == "1"
 FAST_ROUTES = os.getenv("FAST_ROUTES", "0").strip() == "1"  # フォント/解析ブロックON/OFF
+
 # 保険用の上限（ミリ秒）
 GRACE_MS_DEFAULT = 1000
 try:
@@ -56,6 +62,8 @@ FACILITY_TITLE_ALIAS = {
     "南浦和コミュニティセンター": "南浦和",
     "岸町公民館": "岸町",
     "鈴谷公民館": "鈴谷",
+    # ★ 追加
+    "浦和駒場体育館": "浦和駒場",
 }
 
 # ====== 計測ユーティリティ ======
@@ -69,13 +77,11 @@ def time_section(title: str):
         end = time.perf_counter()
         print(f"[TIMER] {title}: end ({end - start:.3f}s)", flush=True)
 
-
 def jst_now() -> datetime.datetime:
     if pytz is None:
         return datetime.datetime.now()
     jst = pytz.timezone("Asia/Tokyo")
     return datetime.datetime.now(jst)
-
 
 def is_within_monitoring_window(start_hour=5, end_hour=23):
     try:
@@ -84,7 +90,6 @@ def is_within_monitoring_window(start_hour=5, end_hour=23):
     except Exception:
         return True, None
 
-
 def load_config() -> Dict[str, Any]:
     text = CONFIG_PATH.read_text("utf-8")
     cfg = json.loads(text)
@@ -92,7 +97,6 @@ def load_config() -> Dict[str, Any]:
         if key not in cfg:
             raise RuntimeError(f"config.json の '{key}' が不足しています")
     return cfg
-
 
 def ensure_root_dir(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -103,31 +107,29 @@ def ensure_root_dir(root: Path) -> None:
     except Exception:
         pass
 
-
 def safe_mkdir(d: Path): d.mkdir(parents=True, exist_ok=True)
-
 
 def safe_write_text(p: Path, s: str):
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp"); tmp.write_text(s, "utf-8"); tmp.replace(p)
-
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(s, "utf-8")
+    tmp.replace(p)
 
 def safe_element_screenshot(el, out: Path):
     out.parent.mkdir(parents=True, exist_ok=True)
-    el.scroll_into_view_if_needed(); el.screenshot(path=str(out))
+    el.scroll_into_view_if_needed()
+    el.screenshot(path=str(out))
 
 # ====== 不要リソースブロック（任意） ======
 def enable_fast_routes(page):
     """フォント/解析のダウンロードを抑止（UIに必須でない範囲）"""
     block_exts = (".woff", ".woff2", ".ttf")
     block_hosts = ("www.google-analytics.com", "googletagmanager.com")
-
     def handler(route):
         url = route.request.url
         if url.endswith(block_exts) or any(h in url for h in block_hosts):
             return route.abort()
         return route.continue_()
-
     page.route("**/*", handler)
 
 # ======（保険用）汎用グレース待機（入口・月遷移では非使用） ======
@@ -180,7 +182,6 @@ def try_click_text(page, label: str, timeout_ms: int = 5000, quiet=True) -> bool
     return False
 
 OPTIONAL_DIALOG_LABELS = ["同意する", "OK", "確認", "閉じる"]
-
 def click_optional_dialogs_fast(page) -> None:
     for label in OPTIONAL_DIALOG_LABELS:
         with time_section(f"optional-dialog: '{label}'"):
@@ -215,7 +216,6 @@ def click_optional_dialogs_fast(page) -> None:
                     pass
 
 # === 入口ステップごとの特徴DOM（必要に応じて調整） ===
-# 次画面で「必ず現れる要素」をセレクタで指定しておくと、レースが即抜けしやすくなります。
 HINTS: Dict[str, str] = {
     "施設の空き状況": ".availability-grid, #availability, .facility-list",
     "利用目的から": ".category-cards, .purpose-list",
@@ -241,7 +241,6 @@ def wait_next_step_ready(page, css_hint: Optional[str] = None) -> None:
             pass
         page.wait_for_timeout(120)
 
-# === 入口クリック列：イベントレース一本化（可視待ち撤廃） ===
 def click_sequence_fast(page, labels: List[str]) -> None:
     for i, label in enumerate(labels):
         with time_section(f"click_sequence: '{label}'"):
@@ -426,6 +425,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
                 if el and el.count() > 0:
                     _safe_click(el, sel); clicked = True; break
             except Exception: pass
+
         if not clicked and prev_month_text:
             try:
                 target = _next_yyyymm01(prev_month_text)
@@ -445,7 +445,7 @@ def click_next_month(page, label_primary="次の月", calendar_root=None, prev_m
                 if chosen:
                     _safe_click(chosen, f"href {chosen_date}"); clicked = True
             except Exception: pass
-        if not clicked: return False
+    if not clicked: return False
 
     with time_section("next-month: wait month text change (+1)"):
         goal = _compute_next_month_text(prev_month_text or "")
@@ -499,7 +499,7 @@ def _status_from_class(cls: str, css_class_patterns: Dict[str, List[str]]) -> Op
 
 def _extract_td_blocks(html: str) -> List[Dict[str, str]]:
     td_blocks: List[Dict[str, str]] = []
-    for m in re.finditer(r"<td\b([^>]*)>(.*?)</td>", html, flags=re.IGNORECASE | re.DOTALL):
+    for m in re.finditer(r"<td\b([^\>]*)>(.*?)</td>", html, flags=re.IGNORECASE | re.DOTALL):
         attrs = m.group(1) or ""
         inner = m.group(2) or ""
         cls = ""
@@ -521,7 +521,7 @@ def _inner_text_like(html_fragment: str) -> str:
     return s.strip()
 
 def _find_day_in_text(text: str) -> Optional[str]:
-    m = re.search(r"([1-9]\d?|[12]\d|3[01])\s*日", text)
+    m = re.search(r"([1-9]\d?|1\d|2\d|3[01])\s*日", text)
     return m.group(0) if m else None
 
 def summarize_vacancies(page, calendar_root, config):
@@ -535,6 +535,7 @@ def summarize_vacancies(page, calendar_root, config):
             html = calendar_root.evaluate("el => el.outerHTML")
         except Exception:
             return _summarize_vacancies_fallback(page, calendar_root, config)
+
         td_blocks = _extract_td_blocks(html)
         for td in td_blocks:
             inner = td["inner"]
@@ -558,6 +559,7 @@ def summarize_vacancies(page, calendar_root, config):
                         break
             if not day:
                 continue
+
             st = _st_from_text_and_src(text_like, patterns)
             if not st:
                 for mm in re.finditer(r"<img\b([^>]*)>", inner, flags=re.IGNORECASE):
@@ -580,6 +582,7 @@ def summarize_vacancies(page, calendar_root, config):
                 st = "未判定"
             summary[st] += 1
             details.append({"day": day, "status": st, "text": text_like})
+
         return summary, details
 
 def _summarize_vacancies_fallback(page, calendar_root, config):
@@ -588,8 +591,10 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
         patterns = config["status_patterns"]
         summary = {"○": 0, "△": 0, "×": 0, "未判定": 0}
         details: List[Dict[str, str]] = []
+
         def _st(raw: str) -> Optional[str]:
             return _st_from_text_and_src(raw, patterns)
+
         cands = calendar_root.locator(":scope tbody td, :scope [role='gridcell']")
         for i in range(cands.count()):
             el = cands.nth(i)
@@ -598,12 +603,12 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
             except Exception:
                 continue
             head = txt[:40]
-            m = _re.search(r"^([1-9]\d?|[12]\d|3[01])\s*日", head, flags=_re.MULTILINE)
+            m = _re.search(r"^([1-9]\d?|1\d|2\d|3[01])\s*日", head, flags=_re.MULTILINE)
             if not m:
                 try:
                     aria = el.get_attribute("aria-label") or ""
                     title = el.get_attribute("title") or ""
-                    m = _re.search(r"([1-9]\d?|[12]\d|3[01])\s*日", aria + " " + title)
+                    m = _re.search(r"([1-9]\d?|1\d|2\d|3[01])\s*日", aria + " " + title)
                 except Exception:
                     pass
             if not m:
@@ -612,7 +617,7 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
                     for j in range(jcnt):
                         alt = imgs.nth(j).get_attribute("alt") or ""
                         tit = imgs.nth(j).get_attribute("title") or ""
-                        mm = _re.search(r"([1-9]\d?|[12]\d|3[01])\s*日", alt + " " + tit)
+                        mm = _re.search(r"([1-9]\d?|1\d|2\d|3[01])\s*日", alt + " " + tit)
                         if mm:
                             m = mm
                             break
@@ -621,6 +626,7 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
             if not m:
                 continue
             day = f"{m.group(0)}"
+
             st = _st(txt)
             if not st:
                 try:
@@ -658,6 +664,7 @@ def _summarize_vacancies_fallback(page, calendar_root, config):
                 st = "未判定"
             summary[st] += 1
             details.append({"day": day, "status": st, "text": txt})
+
         return summary, details
 
 def facility_month_dir(short: str, month_text: str) -> Path:
@@ -712,7 +719,7 @@ def _parse_month_text(month_text: str) -> Optional[Tuple[int, int]]:
     return int(m.group(1)), int(m.group(2))
 
 def _day_str_to_int(day_str: str) -> Optional[int]:
-    m = re.search(r"([1-9]\d?|[12]\d|3[01])\s*日", day_str or "")
+    m = re.search(r"([1-9]\d?|1\d|2\d|3[01])\s*日", day_str or "")
     return int(m.group(1)) if m else None
 
 def _weekday_jp(dt: datetime.date) -> str:
@@ -731,7 +738,6 @@ _STATUS_EMOJI = {
     "○": "⭕️",
     "未判定": "❓",
 }
-
 def _decorate_status(st: str) -> str:
     st = st or "未判定"
     return _STATUS_EMOJI.get(st, "❓")
@@ -765,7 +771,7 @@ def build_aggregate_lines(month_text: str, prev_details: List[Dict[str,str]], cu
             lines.append(line)
     return lines
 
-# ====== Discord 通知クライアント ======
+# ====== Discord クライアント ======
 DISCORD_CONTENT_LIMIT = 2000
 DISCORD_EMBED_DESC_LIMIT = 4096
 
@@ -787,24 +793,21 @@ def _truncate_embed_description(desc: str) -> str:
     if len(desc) <= DISCORD_EMBED_DESC_LIMIT: return desc
     return desc[:DISCORD_EMBED_DESC_LIMIT - 3] + "..."
 
-# ====== メンション生成（ユーザーID／@everyone／@here） ======
 def _build_mention_and_allowed() -> Tuple[str, Dict[str, Any]]:
     """
     送信前にメンション文字列と allowed_mentions を決定。
     優先順位：
-      1) DISCORD_MENTION_USER_ID があれば <@ID>
-      2) DISCORD_USE_EVERYONE=1 なら @everyone
-      3) DISCORD_USE_HERE=1 なら @here
-      4) それ以外はメンションなし（allowed_mentions は parse=[]）
+    1) DISCORD_MENTION_USER_ID があれば <@ID>
+    2) DISCORD_USE_EVERYONE=1 なら @everyone
+    3) DISCORD_USE_HERE=1 なら @here
+    4) それ以外はメンションなし（allowed_mentions は parse=[]）
     """
     mention = ""
     allowed: Dict[str, Any] = {}
     uid = os.getenv("DISCORD_MENTION_USER_ID", "").strip()
     use_everyone = os.getenv("DISCORD_USE_EVERYONE", "0").strip() == "1"
     use_here = os.getenv("DISCORD_USE_HERE", "0").strip() == "1"
-
     if uid:
-        # ユーザーメンションが最優先（通知専用サーバーであなた一人ならこれが最適）
         mention = f"<@{uid}>"
         allowed = {"allowed_mentions": {"parse": [], "users": [uid]}}
     elif use_everyone:
@@ -812,7 +815,7 @@ def _build_mention_and_allowed() -> Tuple[str, Dict[str, Any]]:
         allowed = {"allowed_mentions": {"parse": ["everyone"]}}
     elif use_here:
         mention = "@here"
-        # 抑止的に parse=[]（サーバー設定に依存）
+        # 抑止的に parse=[]（サーバ設定に依存）
         allowed = {"allowed_mentions": {"parse": []}}
     else:
         allowed = {"allowed_mentions": {"parse": []}}
@@ -881,11 +884,10 @@ class DiscordWebhookClient:
                 return -1, f"Exception: {e}", {}
 
     def send_embed(self, title: str, description: str, color: int = 0x00B894, footer_text: str = "Facility monitor") -> bool:
-        # ★ 本文（content）にも「メンション＋施設名（太字）＋1行サマリ」を入れて通知プレビュー対応
+        # ★ 本文（content）にも「メンション＋施設名（太字）＋1行サマリ」を入れる
         mention, allowed = _build_mention_and_allowed()
         one_line = (description or "").splitlines()[0] if description else ""
         content = f"{mention} **{title}** — {one_line}".strip() if (mention or one_line or title) else ""
-
         embed = {
             "title": title,
             "description": _truncate_embed_description(description or ""),
@@ -925,6 +927,7 @@ _FACILITY_ALIAS_COLOR_HEX = {
     "岩槻":   "0x2ECC71",  # Green
     "鈴谷":   "0xF1C40F",  # Yellow
     "岸町":   "0xE74C3C",  # Red
+    "浦和駒場": "0x8E44AD",  # Purple-ish
 }
 _DEFAULT_COLOR_HEX = "0x00B894"
 
@@ -951,10 +954,8 @@ def send_aggregate_lines(webhook_url: Optional[str], facility_alias: str, month_
     # ★ タイトルは施設名のみ（年月は出さない）
     title = f"{facility_alias}"
     description = "\n".join(lines)
-
     color_hex = _FACILITY_ALIAS_COLOR_HEX.get(facility_alias, _DEFAULT_COLOR_HEX)
     color_int = _hex_to_int(color_hex)
-
     client = DiscordWebhookClient.from_env()
     client.webhook_url = webhook_url  # 明示引数を優先
     if force_text:
@@ -963,18 +964,59 @@ def send_aggregate_lines(webhook_url: Optional[str], facility_alias: str, month_
         return
     client.send_embed(title=title, description=description, color=color_int, footer_text="Facility monitor")
 
+# ====== ★ 追加：スナップショット世代ローテーション ======
+def rotate_snapshot_files(outdir: Path, max_png: int = 50, max_html: int = 50) -> None:
+    """
+    outdir 内の timestamp 付きスナップショット（calendar_*.png / calendar_*.html）を
+    古い順に削除して、各タイプのファイル数が上限を超えないようにする。
+    latest (calendar.png / calendar.html) は削除対象外。
+    """
+    try:
+        # PNGのローテーション
+        png_ts = sorted(
+            [p for p in outdir.glob("calendar_*.png") if p.is_file()],
+            key=lambda p: p.stat().st_mtime
+        )
+        if len(png_ts) > max_png:
+            for p in png_ts[: len(png_ts) - max_png]:
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+
+        # HTMLのローテーション
+        html_ts = sorted(
+            [p for p in outdir.glob("calendar_*.html") if p.is_file()],
+            key=lambda p: p.stat().st_mtime
+        )
+        if len(html_ts) > max_html:
+            for p in html_ts[: len(html_ts) - max_html]:
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[WARN] rotate_snapshot_files failed: {e}", flush=True)
+
 # ====== メイン ======
 def run_monitor():
     print("[INFO] run_monitor: start", flush=True)
     print(f"[INFO] BASE_DIR={BASE_DIR} cwd={Path.cwd()} OUTPUT_ROOT={OUTPUT_ROOT}", flush=True)
     with time_section("ensure_root_dir"): ensure_root_dir(OUTPUT_ROOT)
+
     try:
         with time_section("load_config"): config = load_config()
     except Exception as e:
         print(f"[ERROR] config load failed: {e}", flush=True); return
+
     facilities = config.get("facilities", [])
     if not facilities:
         print("[WARN] config['facilities'] が空です。", flush=True); return
+
+    # retention 設定（全体）
+    cfg_ret = (config.get("retention") or {})
+    max_png_default = int(cfg_ret.get("max_files_per_month_png", 50))
+    max_html_default = int(cfg_ret.get("max_files_per_month_html", 50))
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -991,7 +1033,6 @@ def run_monitor():
                     print(f"[INFO] current month: {month_text}", flush=True)
 
                 cal_root = locate_calendar_root(page, month_text or "予約カレンダー", facility)
-
                 short = FACILITY_TITLE_ALIAS.get(facility.get('name',''), facility.get('name','')) or facility.get('name','')
                 outdir = facility_month_dir(short or 'unknown_facility', month_text)
                 print(f"[INFO] outdir={outdir}", flush=True)
@@ -1003,6 +1044,13 @@ def run_monitor():
                 prev_details = (prev_payload or {}).get("details") or []
                 changed = summaries_changed(prev_summary, summary)
                 latest_html, latest_png, ts_html, ts_png = save_calendar_assets(cal_root, outdir, save_ts=changed)
+
+                # ★ ローテーション：施設・月ディレクトリ単位
+                # 施設個別上限があれば優先（ない場合は全体デフォルト）
+                fac_ret = facility.get("retention") or {}
+                max_png = int(fac_ret.get("max_files_per_month_png", max_png_default))
+                max_html = int(fac_ret.get("max_files_per_month_html", max_html_default))
+                rotate_snapshot_files(outdir, max_png=max_png, max_html=max_html)
 
                 payload = {
                     "month": month_text, "facility": facility.get('name',''),
@@ -1025,7 +1073,6 @@ def run_monitor():
                 shifts = sorted(set(int(s) for s in shifts if isinstance(s,(int,float))))
                 if 0 not in shifts: shifts.insert(0,0)
                 max_shift = max(shifts); prev_month_text = month_text
-
                 for step in range(1, max_shift + 1):
                     ok = click_next_month(page, calendar_root=cal_root, prev_month_text=prev_month_text,
                                           wait_timeout_ms=20000, facility=facility)
@@ -1041,7 +1088,6 @@ def run_monitor():
                         print(f"[INFO] month(step={step}): {month_text2}", flush=True)
 
                     cal_root2 = locate_calendar_root(page, month_text2 or "予約カレンダー", facility)
-
                     outdir2 = facility_month_dir(short or 'unknown_facility', month_text2)
                     print(f"[INFO] outdir(step={step})={outdir2}", flush=True)
 
@@ -1052,6 +1098,10 @@ def run_monitor():
                         prev_details2 = (prev_payload2 or {}).get("details") or []
                         changed2 = summaries_changed(prev_summary2, summary2)
                         latest_html2, latest_png2, ts_html2, ts_png2 = save_calendar_assets(cal_root2, outdir2, save_ts=changed2)
+
+                        # ★ ローテーション（遷移先の月ディレクトリ）
+                        rotate_snapshot_files(outdir2, max_png=max_png, max_html=max_html)
+
                         payload2 = {
                             "month": month_text2, "facility": facility.get('name',''),
                             "summary": summary2, "details": details2,
@@ -1106,7 +1156,6 @@ def main():
         tmp = BASE_DIR / "config.temp.json"
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
         global CONFIG_PATH; CONFIG_PATH = tmp
-
     run_monitor()
 
 if __name__ == "__main__":
