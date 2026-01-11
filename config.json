@@ -81,5 +81,9 @@
     "log_top_samples": 15,
     "highlight_alpha": 160,
     "highlight_border_width": 3
+  },
+  "retention": {
+    "max_files_per_month_png": 50,
+    "max_files_per_month_html": 50
   }
 }
