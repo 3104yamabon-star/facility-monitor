@@ -24,6 +24,21 @@
       "click_sequence": ["施設の空き状況", "利用目的から", "屋内スポーツ", "バドミントン", "鈴谷公民館", "すべて"],
       "month_shifts": [0, 1],
       "calendar_selector": "table.reservation-calendar"
+    
+    },
+    // ★ 追加分
+    {
+      "name": "浦和駒場体育館",
+      "click_sequence": [
+        "施設の空き状況",
+        "利用目的から",
+        "屋内スポーツ",
+        "バドミントン",
+        "浦和駒場体育館",
+        "浦和駒場体育館第２体育室"
+      ],
+      "month_shifts": [0, 1, 2, 3],
+      "calendar_selector": "table.reservation-calendar"
     }
   ],
   "next_month_label": "次の月",
