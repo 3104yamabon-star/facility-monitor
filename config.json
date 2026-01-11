@@ -1,4 +1,3 @@
-
 {
   "facilities": [
     {
@@ -61,7 +60,10 @@
         "浦和駒場体育館第２体育室"
       ],
       "month_shifts": [0, 1, 2, 3],
-      "calendar_selector": "table.reservation-calendar"
+      "calendar_selector": "table.reservation-calendar",
+      "special_selectors": {
+        "浦和駒場体育館第２体育室": "a[href*='第２体育室'], .room-list a:has-text('第２体育室')"
+      }
     }
   ],
   "next_month_label": "次の月",
@@ -81,9 +83,5 @@
     "log_top_samples": 15,
     "highlight_alpha": 160,
     "highlight_border_width": 3
-  },
-  "retention": {
-    "max_files_per_month_png": 10,
-    "max_files_per_month_html": 10
   }
 }
