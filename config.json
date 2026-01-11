@@ -83,7 +83,7 @@
     "highlight_border_width": 3
   },
   "retention": {
-    "max_files_per_month_png": 50,
-    "max_files_per_month_html": 50
+    "max_files_per_month_png": 10,
+    "max_files_per_month_html": 10
   }
 }
