@@ -5,33 +5,95 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # コミット/プッシュに必要
+  contents: write  # コミット/プッシュに必要
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-
     concurrency:
       group: facility-monitor
       cancel-in-progress: false
 
     env:
+      # ===== 共通環境変数 =====
       PYTHONUNBUFFERED: "1"
       OUTPUT_DIR: snapshots
       PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
-      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }} # ← Secrets から受け取る場合はここでも可
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}  # ← Secretsから受け取る場合はここでも可
       GRACE_MS: "600"
 
+      # ===== 監視時間帯（JST） =====
+      MONITOR_FORCE: "0"       # 1にすると時間外でも実行（超前段チェック・monitor.pyとも通過）
+      MONITOR_START_HOUR: "5"  # 監視開始時刻（時）
+      MONITOR_END_HOUR:   "23" # 監視終了時刻（時）
+      MONITOR_END_MINUTE: "55" # 監視終了時刻（分）※フォールバックは59（後述のbash参照）
+
     steps:
+      # ──────────────────────────────────────────────────────────
+      # ★ 超前段チェック：JSTの現在時刻で時間帯判定し、時間外なら即終了
+      # ──────────────────────────────────────────────────────────
+      - name: Check monitoring window (JST, ultra-early)
+        id: window
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[INFO] Ultra-early window check (JST)..."
+          # FORCE指定なら常に実行
+          if [ "${MONITOR_FORCE:-0}" = "1" ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            echo "[INFO] MONITOR_FORCE=1 → 時間帯に関係なく実行します。"
+            exit 0
+          fi
+
+          # JSTの現在時刻を取得
+          H=$(TZ=Asia/Tokyo date +%H)
+          M=$(TZ=Asia/Tokyo date +%M)
+
+          # 環境変数（未設定時フォールバック値あり）
+          SH=${MONITOR_START_HOUR:-5}
+          EH=${MONITOR_END_HOUR:-23}
+          EM=${MONITOR_END_MINUTE:-59}  # ← フォールバックは 59 のまま
+
+          # [SH:00 〜 EH:EM] の範囲にいるか
+          in_window=0
+          if [ "$H" -gt "$SH" ] && [ "$H" -lt "$EH" ]; then
+            in_window=1
+          elif [ "$H" -eq "$SH" ]; then
+            # 開始時刻に入った瞬間から許容
+            in_window=1
+          elif [ "$H" -eq "$EH" ] && [ "$M" -le "$EM" ]; then
+            in_window=1
+          fi
+
+          echo "ok=$in_window" >> "$GITHUB_OUTPUT"
+          echo "[INFO] Window (JST): ${SH}:00 - ${EH}:${EM}  / Now=${H}:${M}"
+          if [ "$in_window" -ne 1 ]; then
+            echo "[INFO] Outside monitoring window (JST). Early exit before any heavy setup."
+          else
+            echo "[INFO] Within monitoring window (JST). Continue."
+          fi
+
+      - name: Early exit outside window
+        if: steps.window.outputs.ok != '1'
+        run: |
+          echo "[INFO] Exiting early. (No setup / No Python / No Playwright)"
+          exit 0
+
+      # ──────────────────────────────────────────────────────────
+      # 以降：時間内のときのみ実行（if 条件で制御）
+      # ──────────────────────────────────────────────────────────
       - name: Checkout
+        if: steps.window.outputs.ok == '1'
         uses: actions/checkout@v4
 
       - name: Setup Python
+        if: steps.window.outputs.ok == '1'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Cache pip
+        if: steps.window.outputs.ok == '1'
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -40,9 +102,11 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Prepare Playwright cache dir
+        if: steps.window.outputs.ok == '1'
         run: mkdir -p ~/.cache/ms-playwright
 
       - name: Install dependencies
+        if: steps.window.outputs.ok == '1'
         run: |
           pip install -r requirements.txt
           python - <<'PY'
@@ -55,15 +119,14 @@ jobs:
               subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright==1.46.0"])
           PY
 
-      # ★★ 提案Aの堅牢版（フルフォールバック & 厳密なシェルオプション）★★
+      # ★ 提案Aの堅牢版（バージョン検出→キャッシュキー化）
       - name: Compute Playwright cache key
+        if: steps.window.outputs.ok == '1'
         id: pw
         shell: bash
         run: |
           set -euo pipefail
-
           get_ver_py=$(python - <<'PY'
-          # 1) importlib.metadata → 2) pkg_resources → 3) 空文字
           ver = ""
           try:
               import importlib.metadata as m
@@ -77,30 +140,27 @@ jobs:
           print(ver)
           PY
           )
-
-          # 2nd: pip show にフォールバック（標準エラー抑制）
           if [ -z "${get_ver_py}" ]; then
             get_ver_py=$(python -m pip show playwright 2>/dev/null | awk '/Version:/ {print $2}')
           fi
-
           if [ -z "${get_ver_py}" ]; then
             echo "[ERROR] Failed to determine Playwright version."
             exit 1
           fi
-
           echo "Playwright version: ${get_ver_py}"
           echo "version=${get_ver_py}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Playwright browsers (Chromium)
+        if: steps.window.outputs.ok == '1'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-msplaywright-${{ steps.pw.outputs.version }}
           restore-keys: |
             ${{ runner.os }}-msplaywright-
-        # save-always: true # GitHub Actions v4ではデフォルト挙動でOK
 
       - name: Check cached browsers
+        if: steps.window.outputs.ok == '1'
         id: have_browsers
         shell: bash
         run: |
@@ -113,11 +173,12 @@ jobs:
           fi
 
       - name: Install Playwright browsers (Chromium)
-        if: steps.have_browsers.outputs.found == 'false'
+        if: steps.window.outputs.ok == '1' && steps.have_browsers.outputs.found == 'false'
         run: |
           python -m playwright install chromium
 
       - name: Show workspace info
+        if: steps.window.outputs.ok == '1'
         run: |
           echo "PWD=$(pwd)"
           echo "LS_ROOT:"
@@ -126,50 +187,54 @@ jobs:
           python --version
 
       - name: Git safe.directory
+        if: steps.window.outputs.ok == '1'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Validate config.json
+        if: steps.window.outputs.ok == '1'
         run: |
           python -m json.tool config.json > /dev/null
 
-      # ★ 時間帯ゲートを有効化（MONITOR_FORCE=0）し、--force を削除
+      # ★ 時間帯ゲートを有効化（monitor.py 側は --force なしで呼ぶ）
       - name: Run monitor (windowed)
+        if: steps.window.outputs.ok == '1'
         env:
           OUTPUT_DIR: ${{ env.OUTPUT_DIR }}
           BASE_URL: ${{ secrets.BASE_URL }}
           DISCORD_WEBHOOK_URL: ${{ env.DISCORD_WEBHOOK_URL }}
-          DISCORD_MENTION_USER_ID: ${{ secrets.DISCORD_MENTION_USER_ID }}   # ★ Secrets を渡す（必須）
-          DISCORD_FORCE_TEXT: "1"        # ★ これを追加するだけ
-          MONITOR_FORCE: "0"  # ★ 時間帯外では実行しない
-          MONITOR_START_HOUR: "5"   # ★ 05:00 開始
-          MONITOR_END_HOUR: "23"    # ★ 23:55 終了（分は次行）
-          MONITOR_END_MINUTE: "55"  # ★ 終了分指定
+          DISCORD_MENTION_USER_ID: ${{ secrets.DISCORD_MENTION_USER_ID }}
+          DISCORD_FORCE_TEXT: "1"
+          MONITOR_FORCE: "0"                # monitor.py 側でも時間外は実行しない
+          MONITOR_START_HOUR: ${{ env.MONITOR_START_HOUR }}
+          MONITOR_END_HOUR:   ${{ env.MONITOR_END_HOUR }}
+          MONITOR_END_MINUTE: ${{ env.MONITOR_END_MINUTE }}
           GRACE_MS: ${{ env.GRACE_MS }}
         run: |
           echo "[INFO] Starting monitor.py ..."
-          python -u monitor.py  # ★ --force は付けない
+          python -u monitor.py
           echo "[INFO] monitor.py finished."
 
       - name: Show snapshot files (detailed)
+        if: steps.window.outputs.ok == '1'
         run: |
           echo "----- snapshots tree -----"
           find "${{ env.OUTPUT_DIR }}" -type f -printf "%T@ %TY-%Tm-%Td %TH:%TM:%TS %p %s bytes\n" | sort -n || true
-
           echo "----- git status/diff -----"
           git status "${{ env.OUTPUT_DIR }}/" || true
           git diff --name-only "${{ env.OUTPUT_DIR }}/" || true
 
       - name: Ensure snapshots tracked by Git
+        if: steps.window.outputs.ok == '1'
         run: |
           echo "----- git check-ignore -----"
           git check-ignore -v "${{ env.OUTPUT_DIR }}" "${{ env.OUTPUT_DIR }}/**" || true
-
           git add -f "${{ env.OUTPUT_DIR }}/" || true
 
       - name: Commit & Push snapshot updates
+        if: steps.window.outputs.ok == '1'
         run: |
           set -e
           if [[ -n "$(git status --porcelain "${{ env.OUTPUT_DIR }}/")" ]]; then
@@ -182,8 +247,10 @@ jobs:
           fi
 
       - name: Upload snapshots artifact
+        if: steps.window.outputs.ok == '1'
         uses: actions/upload-artifact@v4
         with:
           name: snapshots-${{ github.run_id }}
           path: ${{ env.OUTPUT_DIR }}/
           if-no-files-found: warn
+          # retention-days: 7  # ← 任意：アーティファクトの保持期間を指定
