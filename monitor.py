@@ -1122,21 +1122,30 @@ def run_monitor():
                         navigate_to_facility(page, facility)
                     else:
                         # C: 館選択（sendBldCd）
-                        sel_ok = select_build(page, facility)
-                        if not sel_ok:
-                            print("[NG] C-route failed (select_build). fallback to full entry route.", flush=True)
-                            navigate_to_facility(page, facility)
+                      
+                    sel_ok = select_build(page, facility)
+                    if not sel_ok:
+                        print("[NG] C-route failed (select_build). fallback to full entry route.", flush=True)
+                        navigate_to_facility(page, facility)
+                    else:
+                        # ★ ここを置き換え：館選択直後にカレンダーが見えていれば、余計なクリックは一切しない
+                        print("[INFO] post-select_build: probing calendar visibility (skip extra clicks if visible)", flush=True)
+                        cal_visible = is_calendar_visible(page, facility)
+                        if cal_visible:
+                            print("[INFO] calendar visible right after build selection; starting monitoring immediately.", flush=True)
+                            # 何もしない → そのまま当月の監視へ（従来と同じ後続処理に進む）
                         else:
-                            # 館選択後のステップ（短縮シーケンスがある場合はそれを使う）
+                            # カレンダーが見えていない場合のみ、短縮シーケンス → 入口シーケンスの順でフォールバック
                             seq_from_build = facility.get("click_sequence_from_build")
                             if seq_from_build and isinstance(seq_from_build, list) and len(seq_from_build) > 0:
                                 print("[INFO] using click_sequence_from_build (short path)", flush=True)
                                 click_sequence_fast(page, seq_from_build)
                                 wait_calendar_ready(page, facility)
                             else:
-                                print("[WARN] click_sequence_from_build not provided; using full click_sequence", flush=True)
+                                print("[WARN] click_sequence_from_build not provided or calendar not reached; using full click_sequence", flush=True)
                                 click_sequence_fast(page, facility.get("click_sequence", []))
                                 wait_calendar_ready(page, facility)
+
 
                 # --- 現在の年月を取得
                 with time_section("get_current_year_month_text"):
