@@ -26,7 +26,6 @@
       "calendar_selector": "table.reservation-calendar"
     
     },
-    // ★ 追加分
     {
       "name": "浦和駒場体育館",
       "click_sequence": [
