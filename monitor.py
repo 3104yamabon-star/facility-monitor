@@ -8,7 +8,7 @@
 - 対策B: 戻るクリック強化 (scrollTop + force=True + 部分一致 + href一致)
 - 対策C: 一覧到達判定を OR ヒント＋最大2.5sレース待機に拡張
 - 対策D: 失敗時に _debug/back_failed.html & back_failed.png を保存
-- f文字列の \uXXXX を排し、○/△/× は実文字使用
+- f文字列の \\uXXXX を排し、○/△/× は実文字使用
 """
 import os
 import sys
