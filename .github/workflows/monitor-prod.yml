@@ -1,0 +1,199 @@
+name: Facility Monitor (Production)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "5 * * * *"
+
+permissions:
+  contents: write
+  actions: read
+  checks: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  OUTPUT_DIR: snapshots
+  PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
+  MONITOR_FORCE: "0"
+  MONITOR_START_HOUR: "5"
+  MONITOR_END_HOUR: "23"
+  MONITOR_END_MINUTE: "55"
+  GRACE_MS: "600"
+  DISCORD_FORCE_TEXT: "1"
+
+jobs:
+  monitor:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        facility:
+          - "南浦和コミュニティセンター"
+          - "岩槻南部公民館"
+          - "岸町公民館"
+          - "鈴谷公民館"
+          - "浦和駒場体育館"
+
+    concurrency:
+      group: monitor-prod-${{ matrix.facility }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Check monitoring window (JST)
+        id: window
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${MONITOR_FORCE:-0}" == "1" ]]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          H=$(TZ=Asia/Tokyo date +%H)
+          M=$(TZ=Asia/Tokyo date +%M)
+          SH=${MONITOR_START_HOUR:-5}
+          EH=${MONITOR_END_HOUR:-23}
+          EM=${MONITOR_END_MINUTE:-55}
+          in_window=0
+          if [[ "$H" -gt "$SH" && "$H" -lt "$EH" ]] || \
+             [[ "$H" -eq "$SH" ]] || \
+             [[ "$H" -eq "$EH" && "$M" -le "$EM" ]]; then
+            in_window=1
+          fi
+          echo "ok=$in_window" >> "$GITHUB_OUTPUT"
+
+      - name: Early exit outside window
+        if: steps.window.outputs.ok != '1'
+        run: |
+          echo "[INFO] Outside monitoring window — exit."
+          exit 0
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Prepare Playwright cache dir
+        run: mkdir -p ~/.cache/ms-playwright
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          python - <<'PY'
+          import subprocess, sys
+          try:
+            import playwright
+            print("[INFO] playwright package present.")
+          except Exception:
+            print("[INFO] Installing playwright==1.46.0 ...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright==1.46.0"])
+          PY
+
+      - name: Determine Playwright version (cache key)
+        id: pw
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver=$(python - <<'PY'
+          v=""
+          try:
+            import importlib.metadata as m
+            v = m.version("playwright")
+          except Exception:
+            pass
+          print(v)
+          PY
+          )
+          if [[ -z "$ver" ]]; then
+            ver=$(python -m pip show playwright 2>/dev/null | awk '/Version:/ {print $2}')
+          fi
+          [[ -n "$ver" ]] || { echo "[ERROR] playwright version not found"; exit 1; }
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers (Chromium)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-msplaywright-${{ steps.pw.outputs.version }}
+          restore-keys: |
+            ${{ runner.os }}-msplaywright-
+
+      - name: Configure Git user
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Validate config.json
+        run: python -m json.tool config.json > /dev/null
+
+      - name: Run monitor (production)
+        env:
+          OUTPUT_DIR: ${{ env.OUTPUT_DIR }}
+          BASE_URL: ${{ secrets.BASE_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_MENTION_USER_ID: ${{ secrets.DISCORD_MENTION_USER_ID }}
+          DISCORD_FORCE_TEXT: ${{ env.DISCORD_FORCE_TEXT }}
+          MONITOR_FORCE: "0"
+          MONITOR_START_HOUR: ${{ env.MONITOR_START_HOUR }}
+          MONITOR_END_HOUR: ${{ env.MONITOR_END_HOUR }}
+          MONITOR_END_MINUTE: ${{ env.MONITOR_END_MINUTE }}
+          GRACE_MS: ${{ env.GRACE_MS }}
+        run: |
+          echo "[INFO] Start monitor for facility: ${{ matrix.facility }}"
+          python -u monitor.py --facility "${{ matrix.facility }}"
+          echo "[INFO] monitor.py finished for ${{ matrix.facility }}"
+
+      - name: Ensure snapshots tracked by Git
+        run: |
+          git add -f "${{ env.OUTPUT_DIR }}/" || true
+
+      - name: Commit & Push snapshots (rebase & retry)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$(git status --porcelain "${{ env.OUTPUT_DIR }}/")" ]]; then
+            git commit -m "chore: update snapshots ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))"
+          else
+            echo "No changes; creating empty commit for run history."
+            git commit -m "chore: run without snapshot changes ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))" --allow-empty || true
+          fi
+
+          tries=0; max_tries=3
+          while true; do
+            tries=$((tries+1))
+            if git push origin HEAD:main; then
+              echo "[INFO] push succeeded (try $tries)"
+              break
+            fi
+            if [[ $tries -ge $max_tries ]]; then
+              echo "[ERROR] push failed after $tries tries"
+              exit 1
+            fi
+            echo "[WARN] push rejected; fetch & rebase then retry ($tries/$max_tries)"
+            git fetch origin main
+            git pull --rebase origin main || true
+            git rebase --continue || git rebase --abort || true
+            git add -A
+            git commit -m "chore: update snapshots ($(TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M:%S JST'))" || true
+          done
+
+      - name: Upload snapshots artifact (per facility)
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-${{ matrix.facility }}-${{ github.run_id }}
+          path: ${{ env.OUTPUT_DIR }}/
+          if-no-files-found: warn
