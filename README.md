@@ -1,85 +1,296 @@
-# Facility Availability Monitor
 
-さいたま市の施設予約システムの「空き状況」を Playwright（Chromium）で巡回し、  
-月ごとの予約カレンダーを **HTML/PNGでスナップショット保存**、前回との差分（空きが増えた等）を **Discordへ通知** する自動監視ツールです。
+README — さいたま市 施設予約システム 空き状況監視ツール
+###（月表示監視＋改善日クリックで「空き」時間帯抽出＋Discord通知）
 
-## 機能概要
+📌 この README の目的
+本ツールは、さいたま市の「公共施設予約システム（月間カレンダー）」を自動監視し、
 
-- 施設ごとのナビゲーション（リンク/ボタンのクリック列）を構成し、予約カレンダーへ到達します。
-- 予約カレンダーのセルを解析し、**○/△/×/未判定**の件数サマリーと日別詳細を生成します。
-- スナップショット（`calendar.html` / `calendar.png`）を出力。差分があった場合、時刻付きファイル（例：`calendar_20260113_152412.html/png`）も保存します。
-- 「×→△」「△→○」など、**改善遷移**が発生した日を抽出し、**Discord（Webhook）へ通知**します（メンション設定可）。
-- GitHub Actions 上で **JSTの監視時間帯**（既定：5:00〜23:55）にのみ実行。キャッシュと再利用で高速化し、成果物をコミット/プッシュ・Artifactsにも保存します。
-- スナップショットの古い世代を**ローテーション**して、月ディレクトリ内のファイル数上限を維持します。
+月間カレンダーの 空き状況（○/△/×/休館/保守/受付期間外）を自動解析
+前回との差分から 改善日（×→△、△→○、×→○、未判定→△/○など）を抽出
+改善日の 日付セルをクリック → 時間帯表示に遷移
+各時間帯の中から 「空き」だけ抽出（○や△ではなく「空き」表示）
+Discord へまとめて通知（施設別色分け／メンション対応）
+HTML・PNG の保存 ＋ ローテーション管理
 
----
+までを自動化します。
+設定ファイル（config (1).json）を参照して、各施設固有の遷移ロジックと CSS セレクタが柔軟に定義できます。
 
-## リポジトリ構成
+1. 機能概要
+✔ 月表示（カレンダー）の解析
 
-```
-.
-├── monitor.py                 # メイン監視ロジック（Playwright/Discord/解析/保存）
-├── config.json                # 施設ごとのクリック手順・解析ヒント等の設定
-└── .github/
-    └── workflows/
-        └── monitor.yml        # GitHub Actions ワークフロー（JST時間帯制御/キャッシュ/成果物）
-```
+HTML / aria-label / title / img alt / img src / CSS class など複数手がかりでステータス判定
+本設定では以下の種別に対応：
 
----
+"全て空き" → ◯
+"一部空き" → △
+"予約あり" → ×
+"休館日" → × 扱い or 未判定 扱い（通知対象外）
+"保守日" "受付期間外" も認識
 
-## 前提条件 / 依存
 
-- Python 3.11（GitHub Actionsでは`actions/setup-python@v5`でセットアップ）
-- pip で必要パッケージをインストール（`requirements.txt` + 必要に応じて `playwright==1.46.0` をピン止め追加インストール）
-- Playwright **Chromium** ブラウザ（キャッシュ再利用。未キャッシュ時は`python -m playwright install chromium`を実行）
 
-> ローカル開発では、事前に `pip install -r requirements.txt` と `python -m playwright install chromium` を行ってください。
+✔ 改善日の判定
+status_counts.json との比較で改善日のみ抽出。
+改善ルールはソースコード側の固定値（×→△、△→○ etc.）
+✔ 時間帯表示の解析（改善日だけクリック）
 
----
+FACILITY_TIME_MAP により、施設ごとの時間帯ラベル → 「9～11時」などに変換
+時間帯セルの "空き" / "予約あり" を抽出
+「空き」だけ Discord に通知
 
-## セットアップ
+✔ Discord 通知
 
-### 1) `config.json` を確認/編集
-施設ごとのクリック手順・解析ヒントをJSONで定義します。
+施設ごとの色（南浦和＝ブルー、岩槻＝グリーン など）
+メンション可：個別ユーザ / everyone / here
+Embed またはテキスト強制も可
 
-### 2) Secrets / 環境変数
-GitHub Actions で以下を設定します。
+✔ スナップショット
 
-- `BASE_URL`：さいたま市施設予約トップ
-- `DISCORD_WEBHOOK_URL`：通知先のDiscord Webhook URL
-- （任意）`DISCORD_MENTION_USER_ID`：個別ユーザーにメンションする場合のDiscordユーザーID
+calendar.html, calendar.png
+状態変化時：タイムスタンプ付き保存
+月別フォルダに整理
+max N ファイルまで自動削除（ローテーション）
 
-### 3) 監視時間帯（JST）
-既定は **05:00〜23:55** の間のみ実行します。`monitor.yml` の環境変数で調整可能です。
+✔ 次の月へ自動遷移
 
----
+月遷移リンクを config の候補リスト から探索
+施設ごとに month_shifts: [0,1,2,3] → 今月〜3ヶ月先を監視
 
-## 実行方法
 
-### GitHub Actions（手動起動）
-`workflow_dispatch` に対応しており、Actionsタブから**Run workflow**で起動できます。
+2. 前提条件
 
-### ローカル実行
-環境変数を設定して `python monitor.py` を起動します。
+Python 3.9+
+Playwright（Chromium）
+ネットワーク：
 
----
+さいたま市 施設予約サイト
+Discord Webhook
 
-## 出力と保存先
 
-- ルート出力ディレクトリ：`OUTPUT_DIR`（既定：`snapshots/`）
-- 階層：`snapshots/<施設エイリアス>/<YYYY年M月>/`
-- 主なファイル：`calendar.html` / `calendar.png`、差分時のみ時刻付きファイル、`status_counts.json`
+オプション：pytz / jpholiday
 
----
 
-## 通知仕様（Discord）
+3. インストール
+Shellpython -m venv .venvsource .venv/bin/activatepip install playwright pytz jpholidaypython -m playwright install chromiumその他の行を表示する
 
-- Embedを優先、失敗時はプレーンテキストにフォールバック
-- タイトルは施設エイリアス、本文は改善遷移の行を列挙
+4. 設定ファイル config.json（今回の config (1).json 形式）
+以下の構造が必要です。
 
----
+● selectors（共通セレクタ定義）
+JSON"selectors": {  "back_from_month_selector": "a[href*='gRsvWInstSrchMonthVacantBackAction']",  "month_table_selector": "table.m_akitablelist",  "facility_list_selector": "table.tcontent a[href*='gRsvWTransInstSrchInstAction']",  "facility_link_by_code_template":    "table.tcontent a[href*=\"gRsvWTransInstSrchInstAction\"][href*=\"'{code}'\"]",  "next_month_selector_candidates": [    "a[href*='moveCalender'][href*='gRsvWInstSrchMonthVacantAction']",    "a:has-text('次の月')",    "a:has-text('翌月')"  ]}その他の行を表示する
 
-## ライセンス / 注意事項
+● facilities（施設ごとの遷移定義）
+各施設ブロックには以下の要素があります：
 
-- 本ツールは、対象ウェブサイトの構造に依存します。サイト改修で動作しなくなる場合があります。
-- 予約情報の取得は画面スクレイピングによります。過度なリクエストは避け、監視時間帯設定を適切に運用してください。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+キー内容name画面上で表示される施設名称aliasDiscord通知・フォルダ保存用の短縮名facility_codeBldCd で選択するための ID（館選択ワークフロー用）click_sequence画面上のラベルを順にクリックするリストpost_facility_click_steps部屋選択等の追加ステップcalendar_selector月表示テーブルの CSSspecial_selectors通常クリックできない場合の直接セレクタ指定special_pre_actionsクリック前に SCROLL や WAIT を実行step_hints遷移待ち判定に使う CSSmonth_shifts今月から何ヶ月先まで巡回するか（例：0,1,2,3）
+※ config (1).json の例：
+
+南浦和＝4ヶ月先まで
+岸町・鈴谷＝1ヶ月先まで
+駒場＝4ヶ月先まで
+鈴谷・駒場は特定操作に special_selectors を追加
+
+
+● status_patterns（ステータス判定キーワード）
+JSON"status_patterns": {  "circle": ["全て空き"],  "triangle": ["一部空き"],  "cross": ["予約あり"],  "holiday": ["休館日"],  "maintenance": ["保守日"],  "outside": ["受付期間外"]}その他の行を表示する
+注：
+本ツールは最終的に ○/△/×/未判定 の 4分類に統一します。
+休館日・保守日などは × 扱い or 未判定扱い（通知しない）になります。
+
+● css_class_patterns（class属性から補助判定）
+JSON"css_class_patterns": {  "circle": ["status-ok","ok","vacant","maru","available","is-available","icon-ok"],  "triangle": ["status-partial","partial","few","warning","limited","icon-partial"],  "cross": ["status-ng","full","unavailable","batsu","is-full","icon-ng"]}その他の行を表示する
+
+● debug
+JSON"debug": {  "dump_calendar_html": true,  "log_top_samples": 15,  "highlight_alpha": 160,  "highlight_border_width": 3}その他の行を表示する
+monitor.py 内部で _debug フォルダへ証跡が保存されます。
+
+5. 環境変数（monitor.py 側で使用）
+主要項目（抜粋）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+変数説明BASE_URLトップURLOUTPUT_DIR保存先DISCORD_WEBHOOK_URLWebhook URL（通知）MONITOR_START_HOUR / MONITOR_END_HOUR実行許可時間FAST_ROUTESGA/フォントブロックGRACE_MS画面安定化待ちDISCORD_MENTION_USER_ID通知時のメンションDISCORD_FORCE_TEXTEmbedを使わずテキスト通知
+
+6. 監視の流れ（内部動作）
+以下の処理を施設ごとに順番に実行：
+
+施設トップへ遷移
+click_sequence を順番に実行（special_selectors があれば優先）
+post_facility_click_steps を実行
+月間カレンダーを解析 → summary/details 出力
+前回との差分から改善日抽出
+改善日だけ
+
+日付セルクリック → 時間帯表示へ
+"空き" の時間帯だけ抽出
+
+
+Discord 通知
+month_shifts に従い 翌月 → 翌々月…と遷移
+各月ごとに（4〜7）を繰り返す
+次の施設へ
+
+
+7. 出力
+OUTPUT_DIR/
+  └─ 施設名（alias）/
+       └─ YYYY年M月/
+            ├─ calendar.html
+            ├─ calendar.png
+            ├─ calendar_YYYYmmdd_HHMMSS.html/png
+            └─ status_counts.json
+
+  └─ _debug/
+       ├─ timesheet_after_click_dayXX.png
+       ├─ back_to_month_failed.html
+       └─ ...
+
+
+8. 実行方法
+全施設を監視
+Shellpython monitor.pyその他の行を表示する
+特定施設だけ
+Shellpython monitor.py --facility "鈴谷公民館"その他の行を表示する
+監視時間外でも強制実行
+ShellMONITOR_FORCE=1 python monitor.pyその他の行を表示する
+
+9. トラブルシューティング（設定ファイル版）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+症状原因と対処🔴 月表示へ遷移しないclick_sequence が誤っている → label を修正🔴 クリック対象が見つからないspecial_selectors で CSS を追加🔴 翌月に進まないselectors.next_month_selector_candidates を増強🔴 部屋選択が必要post_facility_click_steps + special_selectors を追加🔴 改善日が抽出されないstatus_patterns / css_class_patterns の見直し🔴 時間帯が取れないFACILITY_TIME_MAP の対象施設ラベルを追加
+
+10. セキュリティ上の注意
+
+Discord Webhook URL は絶対に公開しない
+スナップショットに個人情報が映る場合は保存先を限定
+定期実行の場合、アクセス過多にならないように GRACE_MS を調整
+
+
+11. 拡張ポイント
+
+遷移ステップ追加：special_pre_actions / special_selectors
+時間帯ラベル追加：FACILITY_TIME_MAP に追記
+施設追加：facilities 配列にコピーして追加
+API 化：Discord 以外の通知にも容易に拡張可
+
+
+12. まとめ
+今回の README は、
+monitor.py（本体） と config (1).json（設定） の両方に完全に適合するようリライトしたものです。
