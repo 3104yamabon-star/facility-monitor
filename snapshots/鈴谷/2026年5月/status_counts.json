@@ -1,21 +1,21 @@
 {
-  "month": "2026年6月",
-  "facility": "岩槻南部公民館",
+  "month": "2026年5月",
+  "facility": "鈴谷公民館",
   "summary": {
     "○": 0,
-    "△": 17,
-    "×": 12,
+    "△": 0,
+    "×": 30,
     "未判定": 1
   },
   "details": [
     {
       "day": "1日",
-      "status": "△",
+      "status": "×",
       "text": "1日"
     },
     {
       "day": "2日",
-      "status": "△",
+      "status": "×",
       "text": "2日"
     },
     {
@@ -25,7 +25,7 @@
     },
     {
       "day": "4日",
-      "status": "△",
+      "status": "×",
       "text": "4日"
     },
     {
@@ -45,27 +45,27 @@
     },
     {
       "day": "8日",
-      "status": "×",
+      "status": "未判定",
       "text": "8日"
     },
     {
       "day": "9日",
-      "status": "△",
+      "status": "×",
       "text": "9日"
     },
     {
       "day": "10日",
-      "status": "△",
+      "status": "×",
       "text": "10日"
     },
     {
       "day": "11日",
-      "status": "△",
+      "status": "×",
       "text": "11日"
     },
     {
       "day": "12日",
-      "status": "△",
+      "status": "×",
       "text": "12日"
     },
     {
@@ -80,27 +80,27 @@
     },
     {
       "day": "15日",
-      "status": "△",
+      "status": "×",
       "text": "15日"
     },
     {
       "day": "16日",
-      "status": "△",
+      "status": "×",
       "text": "16日"
     },
     {
       "day": "17日",
-      "status": "△",
+      "status": "×",
       "text": "17日"
     },
     {
       "day": "18日",
-      "status": "△",
+      "status": "×",
       "text": "18日"
     },
     {
       "day": "19日",
-      "status": "△",
+      "status": "×",
       "text": "19日"
     },
     {
@@ -120,22 +120,22 @@
     },
     {
       "day": "23日",
-      "status": "△",
+      "status": "×",
       "text": "23日"
     },
     {
       "day": "24日",
-      "status": "△",
+      "status": "×",
       "text": "24日"
     },
     {
       "day": "25日",
-      "status": "△",
+      "status": "×",
       "text": "25日"
     },
     {
       "day": "26日",
-      "status": "△",
+      "status": "×",
       "text": "26日"
     },
     {
@@ -145,7 +145,7 @@
     },
     {
       "day": "28日",
-      "status": "未判定",
+      "status": "×",
       "text": "28日"
     },
     {
@@ -155,9 +155,14 @@
     },
     {
       "day": "30日",
-      "status": "△",
+      "status": "×",
       "text": "30日"
+    },
+    {
+      "day": "31日",
+      "status": "×",
+      "text": "31日"
     }
   ],
-  "run_at": "2026-04-01 05:01:23 JST"
+  "run_at": "2026-04-01 05:01:33 JST"
 }
