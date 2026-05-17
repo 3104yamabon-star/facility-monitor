@@ -4,8 +4,8 @@
   "summary": {
     "○": 0,
     "△": 0,
-    "×": 0,
-    "未判定": 31
+    "×": 14,
+    "未判定": 17
   },
   "details": [
     {
@@ -95,74 +95,74 @@
     },
     {
       "day": "18日",
-      "status": "未判定",
+      "status": "×",
       "text": "18日"
     },
     {
       "day": "19日",
-      "status": "未判定",
+      "status": "×",
       "text": "19日"
     },
     {
       "day": "20日",
-      "status": "未判定",
+      "status": "×",
       "text": "20日"
     },
     {
       "day": "21日",
-      "status": "未判定",
+      "status": "×",
       "text": "21日"
     },
     {
       "day": "22日",
-      "status": "未判定",
+      "status": "×",
       "text": "22日"
     },
     {
       "day": "23日",
-      "status": "未判定",
+      "status": "×",
       "text": "23日"
     },
     {
       "day": "24日",
-      "status": "未判定",
+      "status": "×",
       "text": "24日"
     },
     {
       "day": "25日",
-      "status": "未判定",
+      "status": "×",
       "text": "25日"
     },
     {
       "day": "26日",
-      "status": "未判定",
+      "status": "×",
       "text": "26日"
     },
     {
       "day": "27日",
-      "status": "未判定",
+      "status": "×",
       "text": "27日"
     },
     {
       "day": "28日",
-      "status": "未判定",
+      "status": "×",
       "text": "28日"
     },
     {
       "day": "29日",
-      "status": "未判定",
+      "status": "×",
       "text": "29日"
     },
     {
       "day": "30日",
-      "status": "未判定",
+      "status": "×",
       "text": "30日"
     },
     {
       "day": "31日",
-      "status": "未判定",
+      "status": "×",
       "text": "31日"
     }
   ],
-  "run_at": "2026-01-31 11:11:00 JST"
+  "run_at": "2026-05-17 22:11:07 JST"
 }
