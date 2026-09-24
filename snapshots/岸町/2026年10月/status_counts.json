@@ -3,9 +3,9 @@
   "facility": "岸町公民館",
   "summary": {
     "○": 0,
-    "△": 0,
-    "×": 10,
-    "未判定": 21
+    "△": 11,
+    "×": 15,
+    "未判定": 5
   },
   "details": [
     {
@@ -80,47 +80,47 @@
     },
     {
       "day": "15日",
-      "status": "未判定",
+      "status": "△",
       "text": "15日"
     },
     {
       "day": "16日",
-      "status": "未判定",
+      "status": "△",
       "text": "16日"
     },
     {
       "day": "17日",
-      "status": "未判定",
+      "status": "×",
       "text": "17日"
     },
     {
       "day": "18日",
-      "status": "未判定",
+      "status": "×",
       "text": "18日"
     },
     {
       "day": "19日",
-      "status": "未判定",
+      "status": "△",
       "text": "19日"
     },
     {
       "day": "20日",
-      "status": "未判定",
+      "status": "×",
       "text": "20日"
     },
     {
       "day": "21日",
-      "status": "未判定",
+      "status": "△",
       "text": "21日"
     },
     {
       "day": "22日",
-      "status": "未判定",
+      "status": "△",
       "text": "22日"
     },
     {
       "day": "23日",
-      "status": "未判定",
+      "status": "△",
       "text": "23日"
     },
     {
@@ -130,39 +130,39 @@
     },
     {
       "day": "25日",
-      "status": "未判定",
+      "status": "×",
       "text": "25日"
     },
     {
       "day": "26日",
-      "status": "未判定",
+      "status": "△",
       "text": "26日"
     },
     {
       "day": "27日",
-      "status": "未判定",
+      "status": "△",
       "text": "27日"
     },
     {
       "day": "28日",
-      "status": "未判定",
+      "status": "△",
       "text": "28日"
     },
     {
       "day": "29日",
-      "status": "未判定",
+      "status": "△",
       "text": "29日"
     },
     {
       "day": "30日",
-      "status": "未判定",
+      "status": "△",
       "text": "30日"
     },
     {
       "day": "31日",
-      "status": "未判定",
+      "status": "×",
       "text": "31日"
     }
   ],
-  "run_at": "2026-09-24 09:35:53 JST"
+  "run_at": "2026-09-24 09:41:02 JST"
 }
